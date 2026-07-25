@@ -41,9 +41,12 @@ from playwright.sync_api import sync_playwright
 REPO_DIR = Path(__file__).parent  # asumido: este script vive adentro del repo c21-cerradas-data
 DATASET_PATH = REPO_DIR / "data" / "cerradas.json"
 DESCARGA_TMP = REPO_DIR / "_tmp_export.xlsx"
+RESUMEN_PATH = REPO_DIR / "resumen_actualizacion.xlsx"
 
 TC_APROX = 6100  # Gs por USD, fallback si algún PRECIO viene en PYG sin más contexto
 MARGEN_DIAS = 14  # relee los últimos N días por si hubo cargas tardías
+LIMITE_NUEVAS = 500  # por encima de esto, algo salio mal (rango mal calculado, export duplicado, etc.)
+COLUMNAS_REQUERIDAS = {"ID", "PRECIO CIERRE", "FECHA CIERRE", "M2T", "MUNICIPIO"}
 
 
 BASE_URL = "https://21online.century21.com.py"
@@ -165,6 +168,25 @@ def to_float(v):
         return None
 
 
+def validar_excel(path: Path) -> tuple[bool, str]:
+    """Chequea que el archivo descargado sea un Excel legible con las columnas
+    esperadas, antes de parsearlo. Devuelve (ok, motivo)."""
+    if not path.exists() or path.stat().st_size == 0:
+        return False, "El archivo descargado esta vacio o no se genero."
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        header = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+    except Exception as e:
+        return False, f"El archivo descargado esta corrupto o no es un Excel valido: {e}"
+    if not header:
+        return False, "El archivo descargado no tiene fila de encabezado."
+    faltantes = COLUMNAS_REQUERIDAS - {h for h in header if h}
+    if faltantes:
+        return False, f"Faltan columnas esperadas en el Excel descargado: {sorted(faltantes)}"
+    return True, ""
+
+
 def parsear_excel(path: Path) -> list[dict]:
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb.active  # el nombre de la hoja varia segun la exportacion (ej. "Hoja1")
@@ -246,32 +268,70 @@ def git_commit_push(mensaje: str):
     subprocess.run(["git", "push"], cwd=REPO_DIR, check=True)
 
 
+def escribir_resumen_excel(fecha: str, agregados: int, actualizados: int, total: int,
+                            nuevos: list[dict], alerta: str | None) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Resumen"
+    ws.append(["Fecha de corrida", fecha])
+    ws.append(["Propiedades nuevas", agregados])
+    ws.append(["Propiedades actualizadas", actualizados])
+    ws.append(["Total acumulado", total])
+    ws.append(["Estado", f"ALERTA - push frenado: {alerta}" if alerta else "OK - commit y push realizados"])
+    ws.append([])
+    ws.append(["ID", "Direccion", "Barrio", "Precio", "Fecha de cierre"])
+    for n in nuevos:
+        ws.append([n["id"], n["dir"], n["mu"], n["pr"], n["fc"]])
+    wb.save(RESUMEN_PATH)
+
+
 def main():
     dataset = cargar_dataset_actual()
+    total_previo = len(dataset)
     fecha_desde = fecha_de_corte(dataset)
     fecha_hasta = datetime.now().strftime("%Y-%m-%d")
-    print(f"Dataset actual: {len(dataset)} registros. Exportando desde {fecha_desde} hasta {fecha_hasta}.")
+    fecha_hoy = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"Dataset actual: {total_previo} registros. Exportando desde {fecha_desde} hasta {fecha_hasta}.")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        login(page)  # <-- reemplazar por login real
-        ruta_export = exportar_reporte(page, fecha_desde, fecha_hasta)  # <-- completar selectores reales
+        login(page)
+        ruta_export = exportar_reporte(page, fecha_desde, fecha_hasta)
         browser.close()
+
+    ok, motivo = validar_excel(ruta_export)
+    if not ok:
+        alerta = f"Export invalido, se aborto la corrida sin tocar el dataset: {motivo}"
+        print(f"ALERTA: {alerta}")
+        escribir_resumen_excel(fecha_hoy, 0, 0, total_previo, [], alerta=alerta)
+        ruta_export.unlink(missing_ok=True)
+        return
 
     nuevos = parsear_excel(ruta_export)
     print(f"Exportados {len(nuevos)} registros en el rango.")
 
     dataset_final, agregados, actualizados = upsert(dataset, nuevos)
+    total_final = len(dataset_final)
+
+    alerta = None
+    if agregados > LIMITE_NUEVAS:
+        alerta = f"Las propiedades nuevas ({agregados}) superan el limite de seguridad ({LIMITE_NUEVAS})."
+    elif total_final < total_previo:
+        alerta = f"El total de registros bajo de {total_previo} a {total_final} respecto a la corrida anterior."
+
     DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(DATASET_PATH, "w", encoding="utf-8") as f:
         json.dump(dataset_final, f, ensure_ascii=False, separators=(",", ":"))
 
-    print(f"Agregados: {agregados} | Actualizados: {actualizados} | Total dataset: {len(dataset_final)}")
+    print(f"Agregados: {agregados} | Actualizados: {actualizados} | Total dataset: {total_final}")
 
-    fecha_hoy = datetime.now().strftime("%Y-%m-%d")
-    git_commit_push(f"Actualización semanal cerradas {fecha_hoy}: +{agregados} nuevos, {actualizados} actualizados")
+    if alerta:
+        print(f"ALERTA: {alerta} No se hizo push automatico — revisar manualmente antes de pushear.")
+    else:
+        git_commit_push(f"Actualización semanal cerradas {fecha_hoy[:10]}: +{agregados} nuevos, {actualizados} actualizados")
 
+    escribir_resumen_excel(fecha_hoy, agregados, actualizados, total_final, nuevos, alerta=alerta)
     ruta_export.unlink(missing_ok=True)
 
 

@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 _tmp_export.xlsx
+log_actualizar_cerradas.txt
+run_actualizar_cerradas.bat
+resumen_actualizacion.xlsx
