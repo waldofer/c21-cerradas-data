@@ -13,7 +13,9 @@ Uso:
 
 import argparse
 import json
+import os
 import shutil
+import sys
 from pathlib import Path
 
 from clasificar_precios import UMBRAL_GS, base_m2, clasificar, construir_pool
@@ -35,16 +37,30 @@ def main():
     total_previo = len(dataset)
 
     if not args.dry_run:
-        if not BACKUP.exists():
-            shutil.copy2(DATASET, BACKUP)
-            print(f"Backup creado: {BACKUP}")
+        if BACKUP.exists():
+            n_backup = len(json.loads(BACKUP.read_text(encoding="utf-8")))
+            print(f"Backup ya existía, se conserva: {BACKUP} ({n_backup} registros)")
         else:
-            print(f"Backup ya existía, se conserva: {BACKUP}")
+            # Un backup solo es válido si se toma ANTES de corregir. Si el dataset
+            # ya trae registros marcados, esta corrida no es la primera y crear el
+            # backup ahora guardaría datos ya corregidos bajo un nombre que miente.
+            if any(d.get("px") for d in dataset):
+                print("ERROR: el dataset ya tiene registros marcados con px pero no hay "
+                      "backup. Restaurá el backup desde git antes de continuar.",
+                      file=sys.stderr)
+                sys.exit(1)
+            shutil.copy2(DATASET, BACKUP)
+            n_backup = len(json.loads(BACKUP.read_text(encoding="utf-8")))
+            if n_backup != total_previo:
+                print(f"ERROR: el backup quedó con {n_backup} registros y el dataset "
+                      f"tiene {total_previo}. Copia incompleta, se aborta.", file=sys.stderr)
+                sys.exit(1)
+            print(f"Backup creado y verificado: {BACKUP} ({n_backup} registros)")
 
     pool = construir_pool(dataset)
     # Los que ya tienen px de una corrida anterior no se vuelven a tocar.
     candidatos = [d for d in dataset
-                  if d.get("pr") and d["pr"] > UMBRAL_GS and not d.get("px")]
+                  if d.get("pr") and d["pr"] >= UMBRAL_GS and not d.get("px")]
     print(f"Dataset: {total_previo} registros. Candidatos: {len(candidatos)}")
 
     resultados = []
@@ -63,11 +79,17 @@ def main():
             if acc in ("marcar", "corregir_y_marcar"):
                 reg["px"] = 1
         dataset = [d for d in dataset if d["id"] not in a_eliminar]
-        DATASET.write_text(
+        tmp = DATASET.with_suffix(".json.tmp")
+        tmp.write_text(
             json.dumps(dataset, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8")
+        os.replace(tmp, DATASET)
 
-    escribir_reporte(resultados, total_previo, len(dataset), args.dry_run)
+    if resultados or args.dry_run:
+        proyectado = len(dataset) - (len(a_eliminar) if args.dry_run else 0)
+        escribir_reporte(resultados, total_previo, proyectado, args.dry_run)
+    else:
+        print(f"Sin candidatos: se conserva el reporte existente ({REPORTE.name})")
 
     print(f"\nCorregidos: {sum(1 for r in resultados if r['accion'] in ('corregir','corregir_y_marcar'))}")
     print(f"Eliminados: {len(a_eliminar)}")
@@ -110,7 +132,8 @@ def escribir_reporte(resultados, total_previo, total_final, dry_run):
             g = r["reg"]
             L.append(f"| {g['id']} | {g['fc']} | {g.get('su','')} | {g.get('mu','')} | {r['detalle']} |")
 
-    for causa in ("digito_faltante", "superficie_corrupta", "sin_pares", "sin_cotizacion"):
+    for causa in ("digito_faltante", "superficie_corrupta", "zona_sin_comparables",
+                  "parcela_grande", "sin_pares", "sin_cotizacion"):
         rs = por_causa.get(causa, [])
         if not rs:
             continue

@@ -36,7 +36,7 @@ def base_m2(reg):
 def construir_pool(dataset):
     """Comparables usables: los que ya están en USD y tienen superficie válida."""
     return [d for d in dataset
-            if d.get("pr") and 3_000 <= d["pr"] <= UMBRAL_GS and base_m2(d)]
+            if d.get("pr") and 3_000 <= d["pr"] < UMBRAL_GS and base_m2(d)]
 
 
 def _pares(reg, pool, nivel):
@@ -72,7 +72,7 @@ def mediana_pares(reg, pool):
 def clasificar(reg, tabla_bcp, pool):
     """Decide el destino de un registro. Ver docstring del módulo."""
     pr = reg.get("pr")
-    if not pr or pr <= UMBRAL_GS:
+    if not pr or pr < UMBRAL_GS:
         return {"accion": "sin_cambio", "causa": "no_esta_en_gs",
                 "pr_nuevo": None, "detalle": ""}
 

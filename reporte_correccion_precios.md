@@ -1,7 +1,7 @@
 # Reporte de corrección de precios históricos
 
-Dataset: 5159 -> 5143 registros.
-Candidatos procesados: 482.
+Dataset: 5159 -> 5140 registros.
+Candidatos procesados: 485.
 
 ## Resumen por causa
 
@@ -9,7 +9,7 @@ Candidatos procesados: 482.
 |---|---|---|
 | validado | corregir | 401 |
 | ambiguo_revision_manual | marcar | 26 |
-| no_es_precio_de_venta | eliminar | 16 |
+| no_es_precio_de_venta | eliminar | 19 |
 | zona_sin_comparables | corregir | 15 |
 | digito_faltante | corregir | 11 |
 | superficie_corrupta | corregir_y_marcar | 6 |
@@ -53,6 +53,7 @@ Quedan marcados con `px` y **sin corregir**.
 
 | ID | Fecha | Subtipo | Barrio | Detalle |
 |---|---|---|---|---|
+| 1422 | 2020-06-26 | casa | Capiatá | 5,000,000 Gs -> USD 737: no es precio de venta |
 | 1539 | 2020-07-24 | nave | Barrio Jara | 7,700,000 Gs -> USD 1,110: no es precio de venta |
 | 2035 | 2020-12-15 | terreno | San Juan del Paraná | 20,000,000 Gs -> USD 2,861: no es precio de venta |
 | 2378 | 2021-01-26 | casa | San Lorenzo | 6,500,000 Gs -> USD 934: no es precio de venta |
@@ -62,6 +63,8 @@ Quedan marcados con `px` y **sin corregir**.
 | 3298 | 2021-06-07 | terreno | Pirebebuy | 15,000,000 Gs -> USD 2,235: no es precio de venta |
 | 4416 | 2021-09-10 | departamento | Luque, Central | 14,755,000 Gs -> USD 2,136: no es precio de venta |
 | 3169 | 2021-12-20 | casa-duplex | San Bernardino | 10,000,000 Gs -> USD 1,470: no es precio de venta |
+| 1 | 2022-01-31 | casa | Herrera, Asunción | 5,000,000 Gs -> USD 709: no es precio de venta |
+| 4596 | 2022-04-25 | departamento | Mburucuyá | 5,000,000 Gs -> USD 733: no es precio de venta |
 | 6679 | 2022-05-07 | casa | Los Laureles | 6,860,000 Gs -> USD 1,002: no es precio de venta |
 | 8181 | 2022-09-16 | casa-en-condominio | Las Lomas | 9,000,000 Gs -> USD 1,289: no es precio de venta |
 | 9147 | 2022-09-30 | local | Barrio Jara | 7,000,000 Gs -> USD 987: no es precio de venta |
@@ -96,6 +99,37 @@ Quedan marcados con `px` y **sin corregir**.
 | 12329 | 2023-03-15 | Loma Pytá | Precio OK (USD 76,218) pero superficie 1.0 m² es imposible |
 | 11957 | 2023-05-31 | Caacupé | Precio OK (USD 186,952) pero superficie 17.7 m² es imposible |
 | 33045 | 2025-07-23 | Julián Augusto Saldívar | Precio OK (USD 12,002) pero superficie 1.14 m² es imposible |
+
+## zona_sin_comparables (15)
+
+| ID | Fecha | Barrio | Detalle |
+|---|---|---|---|
+| 422 | 2020-05-05 | Paraguarí, Paraguarí | factor 0.107 pero referencia débil (L5, 1820 pares): se acepta el dato |
+| 1278 | 2020-05-20 | Paraguarí, Paraguarí | factor 0.105 pero referencia débil (L5, 1820 pares): se acepta el dato |
+| 1494 | 2020-07-15 | Paraguarí, Paraguarí | factor 0.138 pero referencia débil (L5, 1820 pares): se acepta el dato |
+| 1493 | 2020-07-15 | Paraguarí, Paraguarí | factor 0.114 pero referencia débil (L5, 1820 pares): se acepta el dato |
+| 1517 | 2020-07-16 | Paraguarí, Paraguarí | factor 0.120 pero referencia débil (L5, 1820 pares): se acepta el dato |
+| 1569 | 2020-07-29 | Paraguarí, Paraguarí | factor 0.150 pero referencia débil (L5, 1820 pares): se acepta el dato |
+| 1751 | 2020-08-27 | Paraguarí, Paraguarí | factor 0.143 pero referencia débil (L5, 1820 pares): se acepta el dato |
+| 3040 | 2021-01-26 | San Lorenzo | factor 0.105 pero referencia débil (L3, 7 pares): se acepta el dato |
+| 262 | 2021-04-12 | Ñemby, Central | factor 0.010 pero referencia débil (L5, 44 pares): se acepta el dato |
+| 3201 | 2021-07-26 | Limpio | factor 0.136 pero referencia débil (L5, 445 pares): se acepta el dato |
+| 2911 | 2021-10-24 | Loma Pytá | factor 105.097 pero referencia débil (L4, 6 pares): se acepta el dato |
+| 4374 | 2022-03-17 | Ybycuí | factor 0.011 pero referencia débil (L5, 1820 pares): se acepta el dato |
+| 7550 | 2022-08-16 | Mburicaó | factor 0.069 pero referencia débil (L5, 18 pares): se acepta el dato |
+| 4706 | 2022-11-04 | Itauguá | factor 0.147 pero referencia débil (L5, 445 pares): se acepta el dato |
+| 33919 | 2026-07-08 | Caacupé | factor 0.103 pero referencia débil (L5, 1820 pares): se acepta el dato |
+
+## parcela_grande (6)
+
+| ID | Fecha | Barrio | Detalle |
+|---|---|---|---|
+| 1528 | 2020-11-17 | Atyra | 9,024 m²: $/m² no comparable, aceptado sin validar |
+| 2460 | 2021-09-21 | Mbuyapey | 2,700,000 m²: $/m² no comparable, aceptado sin validar |
+| 7941 | 2022-08-29 | Pirebebuy | 20,000 m²: $/m² no comparable, aceptado sin validar |
+| 6553 | 2022-09-23 | Altos | 40,000 m²: $/m² no comparable, aceptado sin validar |
+| 8938 | 2023-01-22 | Pirebebuy | 124,000 m²: $/m² no comparable, aceptado sin validar |
+| 13642 | 2023-06-07 | Eusebio Ayala | 62,000 m²: $/m² no comparable, aceptado sin validar |
 
 ## sin_pares (1)
 
