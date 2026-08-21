@@ -38,6 +38,9 @@ from pathlib import Path
 import openpyxl
 from playwright.sync_api import sync_playwright
 
+from clasificar_precios import clasificar, construir_pool
+from cotizaciones_bcp import TABLA_PATH, descargar_anho
+
 REPO_DIR = Path(__file__).parent  # asumido: este script vive adentro del repo c21-cerradas-data
 DATASET_PATH = REPO_DIR / "data" / "cerradas.json"
 DESCARGA_TMP = REPO_DIR / "_tmp_export.xlsx"
@@ -225,6 +228,44 @@ def parsear_excel(path: Path) -> list[dict]:
     return out
 
 
+def refrescar_anho_actual_bcp():
+    """Actualiza el año en curso de la tabla del BCP antes de usarla."""
+    tabla = json.loads(TABLA_PATH.read_text(encoding="utf-8")) if TABLA_PATH.exists() else {}
+    anho = datetime.now().year
+    try:
+        tabla.update(descargar_anho(anho))
+        tabla = dict(sorted(tabla.items()))
+        TABLA_PATH.write_text(json.dumps(tabla, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"Tabla BCP refrescada para {anho}: {len(tabla)} días")
+    except Exception as e:
+        print(f"AVISO: no se pudo refrescar la tabla BCP ({e}). Se usa la que hay.")
+    return tabla
+
+
+def normalizar_precios(nuevos, dataset_actual, tabla_bcp):
+    """
+    Aplica la misma corrección de moneda a los registros entrantes.
+    Devuelve (nuevos_normalizados, conteos).
+    """
+    pool = construir_pool(dataset_actual)
+    salida, conteos = [], {"corregidos": 0, "eliminados": 0, "marcados": 0}
+    for reg in nuevos:
+        r = clasificar(reg, tabla_bcp, pool)
+        if r["accion"] == "eliminar":
+            conteos["eliminados"] += 1
+            print(f"  ELIMINADO id={reg['id']}: {r['detalle']}")
+            continue
+        if r["accion"] in ("corregir", "corregir_y_marcar"):
+            reg["pr"] = r["pr_nuevo"]
+            conteos["corregidos"] += 1
+        if r["accion"] in ("marcar", "corregir_y_marcar"):
+            reg["px"] = 1
+            conteos["marcados"] += 1
+            print(f"  MARCADO id={reg['id']}: {r['causa']} — {r['detalle']}")
+        salida.append(reg)
+    return salida, conteos
+
+
 def cargar_dataset_actual() -> list[dict]:
     if DATASET_PATH.exists():
         with open(DATASET_PATH, encoding="utf-8") as f:
@@ -269,7 +310,8 @@ def git_commit_push(mensaje: str):
 
 
 def escribir_resumen_excel(fecha: str, agregados: int, actualizados: int, total: int,
-                            nuevos: list[dict], alerta: str | None) -> None:
+                            nuevos: list[dict], alerta: str | None,
+                            conteos_precio: dict | None = None) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Resumen"
@@ -277,6 +319,10 @@ def escribir_resumen_excel(fecha: str, agregados: int, actualizados: int, total:
     ws.append(["Propiedades nuevas", agregados])
     ws.append(["Propiedades actualizadas", actualizados])
     ws.append(["Total acumulado", total])
+    if conteos_precio:
+        ws.append(["Precios corregidos (Gs->USD)", conteos_precio["corregidos"]])
+        ws.append(["Registros eliminados (no son venta)", conteos_precio["eliminados"]])
+        ws.append(["Registros marcados para revisión", conteos_precio["marcados"]])
     ws.append(["Estado", f"ALERTA - push frenado: {alerta}" if alerta else "OK - commit y push realizados"])
     ws.append([])
     ws.append(["ID", "Direccion", "Barrio", "Precio", "Fecha de cierre"])
@@ -311,6 +357,11 @@ def main():
     nuevos = parsear_excel(ruta_export)
     print(f"Exportados {len(nuevos)} registros en el rango.")
 
+    tabla_bcp = refrescar_anho_actual_bcp()
+    nuevos, conteos_precio = normalizar_precios(nuevos, dataset, tabla_bcp)
+    print(f"Normalización de precios: {conteos_precio['corregidos']} corregidos, "
+          f"{conteos_precio['eliminados']} eliminados, {conteos_precio['marcados']} marcados.")
+
     dataset_final, agregados, actualizados = upsert(dataset, nuevos)
     total_final = len(dataset_final)
 
@@ -331,7 +382,8 @@ def main():
     else:
         git_commit_push(f"Actualización semanal cerradas {fecha_hoy[:10]}: +{agregados} nuevos, {actualizados} actualizados")
 
-    escribir_resumen_excel(fecha_hoy, agregados, actualizados, total_final, nuevos, alerta=alerta)
+    escribir_resumen_excel(fecha_hoy, agregados, actualizados, total_final, nuevos,
+                           alerta=alerta, conteos_precio=conteos_precio)
     ruta_export.unlink(missing_ok=True)
 
 
