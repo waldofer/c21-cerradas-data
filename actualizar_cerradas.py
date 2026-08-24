@@ -38,7 +38,7 @@ from pathlib import Path
 import openpyxl
 from playwright.sync_api import sync_playwright
 
-from clasificar_precios import clasificar, construir_pool
+from clasificar_precios import clasificar, construir_pool, UMBRAL_GS
 from cotizaciones_bcp import TABLA_PATH, descargar_anho
 
 REPO_DIR = Path(__file__).parent  # asumido: este script vive adentro del repo c21-cerradas-data
@@ -245,25 +245,90 @@ def refrescar_anho_actual_bcp():
 def normalizar_precios(nuevos, dataset_actual, tabla_bcp):
     """
     Aplica la misma corrección de moneda a los registros entrantes.
-    Devuelve (nuevos_normalizados, conteos).
+    Devuelve (nuevos_normalizados, conteos, diagnosticos).
+
+    `upsert` reemplaza el registro entero por id — no hace merge de campos.
+    Por eso la rama `marcar` es especial: si `clasificar` no pudo derivar
+    nada confiable (el entrante trae el `pr` crudo en Gs, conocidamente
+    basura) y el id ya existe en `dataset_actual` con un `pr` plausible
+    (ya en USD, `< UMBRAL_GS`), se preserva ese `pr` almacenado en vez del
+    crudo — y si nadie le sacó el `px` a mano todavía, se lo deja puesto;
+    si ya no tiene `px`, es una resolución manual y no se la vuelve a
+    marcar. Esto evita que un registro ambiguo, revisado y corregido a
+    mano, sea pisado por su propia versión cruda si reaparece dentro de
+    la ventana de 14 días del export semanal. Las demás ramas
+    (`sin_cambio`, `corregir`, `corregir_y_marcar`, `eliminar`) no
+    cambian: ahí el valor entrante ya es confiable o se sabe derivar, y
+    `upsert` tiene que seguir propagando los cambios reales de la fuente.
     """
     pool = construir_pool(dataset_actual)
-    salida, conteos = [], {"corregidos": 0, "eliminados": 0, "marcados": 0}
+    por_id_actual = {d["id"]: d for d in dataset_actual}
+    salida, diagnosticos = [], []
+    conteos = {"corregidos": 0, "eliminados": 0, "marcados": 0,
+               "preservados": 0, "errores": 0}
     for reg in nuevos:
-        r = clasificar(reg, tabla_bcp, pool)
-        if r["accion"] == "eliminar":
+        try:
+            r = clasificar(reg, tabla_bcp, pool)
+        except Exception as e:
+            # Un fc malformado (u otro dato inesperado) no puede tumbar la
+            # corrida semanal entera. Se deja pasar sin tocar el pr y se
+            # marca para revisión manual, contado aparte.
+            reg["px"] = 1
+            conteos["errores"] += 1
+            print(f"  ERROR clasificando id={reg['id']}: {type(e).__name__}: {e}")
+            diagnosticos.append({"id": reg["id"], "accion": "error",
+                                  "causa": type(e).__name__, "detalle": str(e)})
+            salida.append(reg)
+            continue
+
+        accion = r["accion"]
+
+        if accion == "eliminar":
             conteos["eliminados"] += 1
             print(f"  ELIMINADO id={reg['id']}: {r['detalle']}")
+            diagnosticos.append({"id": reg["id"], "accion": accion,
+                                  "causa": r["causa"], "detalle": r["detalle"]})
             continue
-        if r["accion"] in ("corregir", "corregir_y_marcar"):
+
+        if accion in ("corregir", "corregir_y_marcar"):
             reg["pr"] = r["pr_nuevo"]
             conteos["corregidos"] += 1
-        if r["accion"] in ("marcar", "corregir_y_marcar"):
+
+        if accion == "corregir_y_marcar":
             reg["px"] = 1
             conteos["marcados"] += 1
             print(f"  MARCADO id={reg['id']}: {r['causa']} — {r['detalle']}")
+            diag_accion, diag_causa, diag_detalle = accion, r["causa"], r["detalle"]
+        elif accion == "marcar":
+            almacenado = por_id_actual.get(reg["id"])
+            preservar = (almacenado is not None
+                         and almacenado.get("pr") is not None
+                         and almacenado["pr"] < UMBRAL_GS)
+            if preservar:
+                reg["pr"] = almacenado["pr"]
+                if almacenado.get("px"):
+                    reg["px"] = 1
+                # si almacenado NO tiene px, no se lo ponemos: es una
+                # resolución manual y se respeta tal cual.
+                conteos["preservados"] += 1
+                print(f"  PRESERVADO id={reg['id']}: se conserva pr={almacenado['pr']} "
+                      f"del dataset ({r['causa']})")
+                diag_accion = "preservado"
+                diag_causa = r["causa"]
+                diag_detalle = f"pr almacenado preservado ({almacenado['pr']}); {r['detalle']}"
+            else:
+                reg["px"] = 1
+                conteos["marcados"] += 1
+                print(f"  MARCADO id={reg['id']}: {r['causa']} — {r['detalle']}")
+                diag_accion, diag_causa, diag_detalle = accion, r["causa"], r["detalle"]
+        else:
+            # sin_cambio
+            diag_accion, diag_causa, diag_detalle = accion, r["causa"], r["detalle"]
+
+        diagnosticos.append({"id": reg["id"], "accion": diag_accion,
+                              "causa": diag_causa, "detalle": diag_detalle})
         salida.append(reg)
-    return salida, conteos
+    return salida, conteos, diagnosticos
 
 
 def cargar_dataset_actual() -> list[dict]:
@@ -311,7 +376,8 @@ def git_commit_push(mensaje: str):
 
 def escribir_resumen_excel(fecha: str, agregados: int, actualizados: int, total: int,
                             nuevos: list[dict], alerta: str | None,
-                            conteos_precio: dict | None = None) -> None:
+                            conteos_precio: dict | None = None,
+                            diagnosticos: list[dict] | None = None) -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Resumen"
@@ -323,11 +389,21 @@ def escribir_resumen_excel(fecha: str, agregados: int, actualizados: int, total:
         ws.append(["Precios corregidos (Gs->USD)", conteos_precio["corregidos"]])
         ws.append(["Registros eliminados (no son venta)", conteos_precio["eliminados"]])
         ws.append(["Registros marcados para revisión", conteos_precio["marcados"]])
+        ws.append(["Registros preservados (resolución manual respetada)",
+                   conteos_precio.get("preservados", 0)])
+        ws.append(["Registros con error de clasificación", conteos_precio.get("errores", 0)])
     ws.append(["Estado", f"ALERTA - push frenado: {alerta}" if alerta else "OK - commit y push realizados"])
     ws.append([])
     ws.append(["ID", "Direccion", "Barrio", "Precio", "Fecha de cierre"])
     for n in nuevos:
         ws.append([n["id"], n["dir"], n["mu"], n["pr"], n["fc"]])
+
+    if diagnosticos:
+        ws_diag = wb.create_sheet("Diagnóstico precios")
+        ws_diag.append(["ID", "Acción", "Causa", "Detalle"])
+        for d in diagnosticos:
+            ws_diag.append([d["id"], d["accion"], d["causa"], d["detalle"]])
+
     wb.save(RESUMEN_PATH)
 
 
@@ -358,9 +434,10 @@ def main():
     print(f"Exportados {len(nuevos)} registros en el rango.")
 
     tabla_bcp = refrescar_anho_actual_bcp()
-    nuevos, conteos_precio = normalizar_precios(nuevos, dataset, tabla_bcp)
+    nuevos, conteos_precio, diagnosticos_precio = normalizar_precios(nuevos, dataset, tabla_bcp)
     print(f"Normalización de precios: {conteos_precio['corregidos']} corregidos, "
-          f"{conteos_precio['eliminados']} eliminados, {conteos_precio['marcados']} marcados.")
+          f"{conteos_precio['eliminados']} eliminados, {conteos_precio['marcados']} marcados, "
+          f"{conteos_precio['preservados']} preservados, {conteos_precio['errores']} con error.")
 
     dataset_final, agregados, actualizados = upsert(dataset, nuevos)
     total_final = len(dataset_final)
@@ -383,7 +460,8 @@ def main():
         git_commit_push(f"Actualización semanal cerradas {fecha_hoy[:10]}: +{agregados} nuevos, {actualizados} actualizados")
 
     escribir_resumen_excel(fecha_hoy, agregados, actualizados, total_final, nuevos,
-                           alerta=alerta, conteos_precio=conteos_precio)
+                           alerta=alerta, conteos_precio=conteos_precio,
+                           diagnosticos=diagnosticos_precio)
     ruta_export.unlink(missing_ok=True)
 
 
