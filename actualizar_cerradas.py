@@ -32,6 +32,7 @@ import json
 import re
 import subprocess
 import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -50,6 +51,29 @@ TC_APROX = 6100  # Gs por USD, fallback si algún PRECIO viene en PYG sin más c
 MARGEN_DIAS = 14  # relee los últimos N días por si hubo cargas tardías
 LIMITE_NUEVAS = 500  # por encima de esto, algo salio mal (rango mal calculado, export duplicado, etc.)
 COLUMNAS_REQUERIDAS = {"ID", "PRECIO CIERRE", "FECHA CIERRE", "M2T", "MUNICIPIO"}
+
+JS_CONTAR_FILAS = (
+    "() => (window.jQuery && jQuery.fn.dataTable && jQuery.fn.dataTable.isDataTable('#myTableBusqueda'))"
+    " ? jQuery('#myTableBusqueda').DataTable().rows().count() : -1"
+)
+# Columnas 7 y 8 de la tabla (omitidas tambien por el script de consola documentado).
+JS_EXTRAER_TABLA = """
+() => {
+  const dt = jQuery('#myTableBusqueda').DataTable();
+  const skip = new Set([7, 8]);
+  const heads = dt.columns().header().toArray().map((h, i) => ({i, name: h.textContent.trim()}))
+                  .filter(h => !skip.has(h.i));
+  const strip = v => {
+    if (v == null) return '';
+    const s = String(v);
+    if (s.indexOf('<') !== -1) { const d = document.createElement('div'); d.innerHTML = s; return d.textContent.trim(); }
+    return s.trim();
+  };
+  const data = [];
+  dt.rows().every(function () { const r = this.data(); data.push(heads.map(h => strip(r[h.i]))); });
+  return {headers: heads.map(h => h.name), data};
+}
+"""
 
 
 BASE_URL = "https://21online.century21.com.py"
@@ -125,26 +149,42 @@ def login(page, max_intentos: int = 3):
 
 def exportar_reporte(page, fecha_desde: str, fecha_hasta: str) -> Path:
     """
-    Usa el botón nativo "Descargar" (verde, debajo de los filtros) —
-    confirmado que exporta el Excel completo con todas las columnas
-    (PRECIO CIERRE, M2T, M2C, LAT, LON, etc.), sin necesitar ningún script
-    de consola.
+    Lee la tabla jQuery DataTables ya cargada en la página (mismo método que el
+    script de consola de EXPORTAR_CERRADAS.md) y arma el Excel localmente.
 
-    Selector confirmado contra el sitio real: es un <a>, no un <button>
-    (por eso get_by_role("button", ...) no lo encontraba).
+    NO usa el botón "Descargar" de 21online: devuelve un Excel con solo el
+    encabezado (o solo la oficina propia, según el volumen), aunque la tabla en
+    pantalla muestre todo. Lo que ve la tabla es lo que se exporta.
     """
-    url = construir_url_busqueda(fecha_desde, fecha_hasta)
-    # La página puede tardar bastante (confirmado: hasta ~110 segundos,
-    # con el ícono de carga girando en la pestaña) y a veces hace una
-    # recarga automática antes de mostrar los resultados finales.
-    # Timeout generoso a propósito (150s), con margen extra sobre lo medido.
-    page.goto(url, wait_until="networkidle", timeout=150000)
-    page.wait_for_selector("#myTableBusqueda tbody tr", timeout=150000)
+    # El filtro mesCierreDesde de 21online es por mes: con un "desde" que no es dia 1 devuelve
+    # 0 filas (medido: 2026-10-02 -> 0, 2026-10-01 -> 47). Se arranca siempre desde el dia 1;
+    # las filas de mas son inocuas porque upsert() es por ID.
+    url = construir_url_busqueda(fecha_desde[:8] + "01", fecha_hasta)
+    # La página puede tardar bastante (medido: hasta ~230s con el histórico completo,
+    # ~110s en rangos chicos) y a veces recarga sola antes de mostrar los datos finales:
+    # se espera a que el conteo de filas se estabilice en vez de confiar en un selector.
+    page.goto(url, wait_until="networkidle", timeout=300000)
+    previo, estables = -1, 0
+    limite = time.time() + 480
+    while time.time() < limite and estables < 3:
+        try:
+            n = page.evaluate(JS_CONTAR_FILAS)
+        except Exception:  # la pagina esta recargando
+            n = -2
+        estables = estables + 1 if (n == previo and n > 0) else 0
+        previo = n
+        if estables < 3:
+            page.wait_for_timeout(10000)
+    # Si no se estabilizo, se exporta lo que haya y validar_excel() decide si frena la corrida.
+    resultado = page.evaluate(JS_EXTRAER_TABLA)
 
-    with page.expect_download(timeout=60000) as descarga_info:
-        page.locator("a.btnDescargarInventarioExcel").click()
-    descarga = descarga_info.value
-    descarga.save_as(DESCARGA_TMP)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Propiedades"
+    ws.append(resultado["headers"])
+    for fila in resultado["data"]:
+        ws.append(fila)
+    wb.save(DESCARGA_TMP)
     return DESCARGA_TMP
 
 
@@ -179,7 +219,8 @@ def validar_excel(path: Path) -> tuple[bool, str]:
     try:
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
-        header = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        filas = ws.iter_rows(values_only=True)
+        header = next(filas, None)
     except Exception as e:
         return False, f"El archivo descargado esta corrupto o no es un Excel valido: {e}"
     if not header:
@@ -187,6 +228,11 @@ def validar_excel(path: Path) -> tuple[bool, str]:
     faltantes = COLUMNAS_REQUERIDAS - {h for h in header if h}
     if faltantes:
         return False, f"Faltan columnas esperadas en el Excel descargado: {sorted(faltantes)}"
+    col_id = list(header).index("ID")
+    # Un export con solo encabezado es un fallo (el boton nativo de 21online lo devolvia
+    # asi): el rango siempre incluye MARGEN_DIAS de cierres ya cargados, nunca es 0 de verdad.
+    if not any(r[col_id] for r in filas):
+        return False, "El export no trae ninguna fila de datos (solo encabezado)."
     return True, ""
 
 
@@ -342,7 +388,9 @@ def fecha_de_corte(dataset: list[dict]) -> str:
     if not dataset:
         # sin dataset previo: primer corrida, usar un rango amplio por defecto
         return (datetime.now() - timedelta(days=548)).strftime("%Y-%m-%d")  # ~18 meses
-    ultima = max(d["fc"] for d in dataset)
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    # ignora fechas de cierre futuras (errores de carga): si no, adelantarian el corte y se saltearian cierres
+    ultima = max((d["fc"] for d in dataset if d["fc"] <= hoy), default=hoy)
     corte = datetime.strptime(ultima, "%Y-%m-%d") - timedelta(days=MARGEN_DIAS)
     return corte.strftime("%Y-%m-%d")
 
