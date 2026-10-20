@@ -7,6 +7,7 @@ from ofrecidas import (
     COLUMNAS_REQUERIDAS,
     comparar,
     descarga_sospechosa,
+    quitar_telefonos,
     guardar_ofrecidas,
     parse_precio,
     parsear_ofrecidas,
@@ -244,3 +245,50 @@ def test_guardar_ofrecidas_ida_y_vuelta(tmp_path):
     assert json.loads(destino.read_text(encoding="utf-8")) == sorted(registros, key=lambda r: r["id"])
     assert "Ñandú" in destino.read_text(encoding="utf-8")  # sin escapes ASCII
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+TELEFONOS = [
+    "0981123456", "0981 123 456", "0981-123-456", "+595 981 123456",
+    "595981123456", "+595981123456", "0971-234 567",
+]
+
+
+def test_quitar_telefonos_formas():
+    for tel in TELEFONOS:
+        assert quitar_telefonos(f"Villa Gioconda {tel}") == "Villa Gioconda", tel
+        assert quitar_telefonos(f"Llamar {tel} ahora") == "Llamar ahora", tel
+    assert quitar_telefonos("1234567890123") is None
+
+
+def test_quitar_telefonos_respeta_precios_y_numeros_cortos():
+    for txt in [
+        "Gs. 420.000.000", "USD 150.000", "Casa 3", "lote 12", "1440",
+        "Manzana 12 lote 3 - 1440 m2", "Gs. 900 000 000",
+    ]:
+        assert quitar_telefonos(txt) == txt
+    assert quitar_telefonos(None) is None
+
+
+def test_quitar_telefonos_campo_solo_telefono_queda_none():
+    assert quitar_telefonos("0981 123 456") is None
+    assert quitar_telefonos("   ") is None
+
+
+def _excel_con(tmp_path, dir_, en):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(HEADER)
+    fila = {h: None for h in HEADER}
+    fila.update({"ID": 1, "PRECIO": "100.000,00 USD", "M2T": 500, "FECHA ALTA": "2026-01-01",
+                 "MUNICIPIO": "Luque", "DIRECCION": dir_, "ENCABEZADO": en})
+    ws.append([fila[h] for h in HEADER])
+    ruta = tmp_path / "o.xlsx"
+    wb.save(ruta)
+    return ruta
+
+
+def test_parsear_ofrecidas_quita_telefonos_de_dir_y_en(tmp_path):
+    ruta = _excel_con(tmp_path, "0981-123-456", "Terreno +595 981 123456 en Luque")
+    (r,) = parsear_ofrecidas(ruta)
+    assert r["dir"] is None
+    assert r["en"] == "Terreno en Luque"

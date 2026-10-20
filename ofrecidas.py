@@ -59,6 +59,25 @@ def validar_columnas(header):
     return None
 
 
+# Celulares paraguayos con prefijo (+595 / 595 / 0) y separadores opcionales.
+_RE_CELULAR = re.compile(r"(?<!\d)(?:\+?595[\s-]?|0)9\d{2}[\s-]?\d{3}[\s-]?\d{3}(?!\d)")
+# Cualquier corrida de 9 o mas digitos seguidos.
+_RE_DIGITOS_LARGOS = re.compile(r"\d{9,}")
+
+
+def quitar_telefonos(v):
+    """Saca telefonos del texto libre (DIRECCION, ENCABEZADO). None si el campo queda vacio.
+
+    No toca precios con puntos de miles ni numeros cortos.
+    """
+    if v is None:
+        return None
+    v = _RE_CELULAR.sub(" ", v)
+    v = _RE_DIGITOS_LARGOS.sub(" ", v)
+    v = re.sub(r"\s+", " ", v).strip()
+    return v or None
+
+
 def _texto(v):
     """Celda -> str sin espacios, o None si esta vacia."""
     if v is None:
@@ -114,6 +133,9 @@ def parsear_ofrecidas(path: Path) -> list[dict]:
             }
             for clave, col in _TEXTOS.items():
                 valores[clave] = _texto(celda(fila, col))
+            # Texto libre: el agente a veces escribe telefonos adentro.
+            valores["dir"] = quitar_telefonos(valores["dir"])
+            valores["en"] = quitar_telefonos(valores["en"])
             # Lista blanca: solo salen las claves de CAMPOS.
             por_id[valores["id"]] = {k: valores[k] for k in CAMPOS}
         return list(por_id.values())
