@@ -554,7 +554,7 @@ def test_guardar_ofrecidas_se_niega_si_queda_algo_con_pinta_de_telefono(tmp_path
 
 @pytest.mark.parametrize("txt", [
     "Gs. 1 050 000 000", "precio 1 050 000 000 Gs", "USD 1 098 123",
-    "Precio: 1 050 000 000", "1 050 000 000 dolares", "Gs.1 050 000 000", "Precio 1 050 000 000.-",
+    "1 050 000 000 dolares", "Gs.1 050 000 000",
     "Gs. 960.000.000", "Gs. 2.100.000", "Cta. Cte. Ctral. 15-0123-45", "Lote de 21 600 m2",
 ])
 def test_parece_telefono_respeta_montos_con_espacios(txt):
@@ -633,3 +633,33 @@ def test_alerta_de_barrera_trae_id_y_huella_sin_texto(tmp_path):
     reg2 = next(r for r in resultado["ofrecidas"] if r["id"] == 2)
     assert f"2 ({ofrecidas.huella_texto(reg2)})" in alerta
     assert "6123456" not in alerta
+
+
+@pytest.mark.parametrize("txt", [
+    # de a pares (no son fechas)
+    "Calle 1 21-61-23-45", "Calle 1 21 61-23-45", "Calle 1 (021) - 61-23-45", "Calle 1 0981 - 12-34-56",
+    "Calle 1 0981 12/34/56", "Calle 1 981 12/34/56", "Calle 1 (021) 61/23/45", "Calle 1 021 61/23/45",
+    # terminados en 000 sin moneda (no son montos)
+    "Calle 1 (021) - 612 000", "Calle 1 021 600 000", "Calle 1 (0981) - 500 000", "Calle 1 981 123 000",
+    "Palma 1234,021 612 000", "Tel 21.500.000",
+    # con punto (no son coordenadas)
+    "Calle 1 0981 - 12.34567", "Calle 1 (021) - 6.12345", "Calle 1 21.612345", "Tel 98.1123456",
+    # con dos puntos (no son horas)
+    "Calle 1 (0981) - 12:34:56", "Tel 21 61:23:45",
+])
+def test_parece_telefono_no_se_disfraza_de_fecha_monto_coordenada_u_hora(txt):
+    assert ofrecidas.parece_telefono(txt)
+
+
+@pytest.mark.parametrize("txt", [
+    "Gs.1.050.000.000", "Gs.1.000.000.000", "Gs 1,050,000,000", "Gs 900 000 000 120 m2",
+    "Gs 1 000 000 000 360 m2", "Disponible 01/12/2026 - 2 dorm", "Gs. 960.000.000",
+    "USD 120.000 - 3 dorm", "Precio 1.200.000.000 negociable",
+])
+def test_parece_telefono_respeta_mas_formas_de_precio(txt):
+    assert not ofrecidas.parece_telefono(txt)
+
+
+def test_monto_con_espacios_sin_moneda_frena():
+    # "Precio: 1 050 000 000" no se distingue de "Calle 1 021 600 000": ante la duda, frena.
+    assert ofrecidas.parece_telefono("Precio: 1 050 000 000")

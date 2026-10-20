@@ -116,12 +116,18 @@ def quitar_telefonos(v):
 # entre digitos se toma como parte del mismo numero ("(021) - 612345", "0 9 8 1 1 2 3 4 5 6").
 # Antes se sacan las cosas conocidas que tienen digitos y no son telefonos.
 _RE_LETRAS = re.compile(r"[^\W\d_]+")
-# Monto redondo con miles ("1.050.000.000", "Gs 900 000 000"): los precios terminan en 000.
-_RE_MONTO = re.compile(r"(?<![\d.])\d{1,3}(?:([. ])\d{3})(?:\1\d{3})*(?![\d])")
-# Coordenada decimal ("-25.2674758", "-59.5123456"), fecha ("12/05/2021") y hora ("08:00").
-_RE_COORDENADA = re.compile(r"(?<!\d)-?\d{1,2}\.\d{5,}")
-_RE_FECHA = re.compile(r"(?<!\d)\d{1,2}[/-]\d{1,2}[/-](?:\d{4}|\d{2})(?!\d)")
-_RE_HORA = re.compile(r"(?<!\d)\d{1,2}:\d{2}(?!\d)")
+# Monto con miles ("1.050.000.000", "Gs 900 000 000", "1,050,000,000"): nunca empieza con 0.
+_RE_MONTO = re.compile(r"(?<!\d)(?<!\d[.,])[1-9]\d{0,2}([., ])\d{3}(?:\1\d{3})*(?!\d)")
+_RE_MONEDA_ANTES = re.compile(r"(?:gs\.?|guaran\w*|usd|us\$|u\$s|pyg|\$)\s*$", re.IGNORECASE)
+_RE_MONEDA_DESPUES = re.compile(
+    r"\s*(?:gs\b|usd\b|pyg\b|u\$s|us\$|guaran|millones|mill\b|d[oó]lares)", re.IGNORECASE
+)
+# Coordenada de Paraguay ("-25.2674758", "-57.6123456"): con signo y en rango de lat/lon.
+_RE_COORDENADA = re.compile(r"(?<![\d.])-(?:19|2[0-8]|5[4-9]|6[0-3])\.\d{4,}")
+# Fecha real con anio de 4 digitos ("12/05/2021", "1-2-2026"); un "21-61-23-45" no lo es.
+_RE_FECHA = re.compile(r"(?<!\d)(?:0?[1-9]|[12]\d|3[01])([/-])(?:0?[1-9]|1[0-2])\1(?:19|20)\d{2}(?!\d)")
+# Hora real ("08:00"), sin mas ":NN" detras ("12:34:56" no es hora).
+_RE_HORA = re.compile(r"(?<![\d:])(?:[01]?\d|2[0-3]):[0-5]\d(?![\d:])")
 # Codigo postal paraguayo (6 digitos que empiezan con 0), que el geocodificador agrega a la
 # direccion: "Asuncion 001204 388", "SAN JUAN BAUTISTA 080106 080106".
 _RE_CODIGO_POSTAL = re.compile(r"0\d{5}")
@@ -132,7 +138,21 @@ _CORTE = "|"
 
 def _sin_numeros_conocidos(texto: str) -> str:
     def monto(m):
-        return _CORTE if m.group().endswith("000") and m.group(1) else m.group()
+        grupos = m.group().split(m.group(1))
+        # El monto termina en el ultimo grupo "000" ("Gs 900 000 000 120 m2" -> deja "120").
+        ultimo = max((i for i, g in enumerate(grupos) if g == "000"), default=0)
+        if ultimo == 0:
+            return m.group()
+        con_moneda = _RE_MONEDA_ANTES.search(texto[: m.start()]) or _RE_MONEDA_DESPUES.match(
+            texto, m.start() + len(m.group(1).join(grupos[: ultimo + 1]))
+        )
+        # Sin moneda al lado solo se cree en montos de mil millones o mas escritos con puntos o
+        # comas ("1.050.000.000"): "21.500.000", "500 000" o "1 021 600 000" (un "1" pegado a
+        # un fijo) podrian ser un telefono.
+        if not con_moneda and (ultimo < 3 or m.group(1) == " "):
+            return m.group()
+        resto = m.group(1).join(grupos[ultimo + 1:])
+        return _CORTE + (m.group(1) + resto if resto else "")
 
     texto = _RE_MONTO.sub(monto, texto)
     for patron in (_RE_COORDENADA, _RE_FECHA, _RE_HORA):
