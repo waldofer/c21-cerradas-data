@@ -118,7 +118,7 @@ def quitar_telefonos(v):
 _RE_LETRAS = re.compile(r"[^\W\d_]+")
 # Monto con miles ("1.050.000.000", "Gs 900 000 000", "1,050,000,000"): nunca empieza con 0.
 _RE_MONTO = re.compile(r"(?<!\d)(?<!\d[.,])[1-9]\d{0,2}([., ])\d{3}(?:\1\d{3})*(?!\d)")
-_RE_MONEDA_ANTES = re.compile(r"(?:gs\.?|guaran\w*|usd|us\$|u\$s|pyg|\$)\s*$", re.IGNORECASE)
+_RE_MONEDA_ANTES = re.compile(r"(?:\bgs?|guaran\w*|usd|us\$|u\$s|pyg|\$|₲)[\s.:\-]*$", re.IGNORECASE)
 _RE_MONEDA_DESPUES = re.compile(
     r"\s*(?:gs\b|usd\b|pyg\b|u\$s|us\$|guaran|millones|mill\b|d[oó]lares)", re.IGNORECASE
 )
@@ -143,13 +143,16 @@ def _sin_numeros_conocidos(texto: str) -> str:
         ultimo = max((i for i, g in enumerate(grupos) if g == "000"), default=0)
         if ultimo == 0:
             return m.group()
-        con_moneda = _RE_MONEDA_ANTES.search(texto[: m.start()]) or _RE_MONEDA_DESPUES.match(
+        con_moneda = _RE_MONEDA_ANTES.search(texto[max(0, m.start() - 12): m.start()]) or _RE_MONEDA_DESPUES.match(
             texto, m.start() + len(m.group(1).join(grupos[: ultimo + 1]))
         )
         # Sin moneda al lado solo se cree en montos de mil millones o mas escritos con puntos o
         # comas ("1.050.000.000"): "21.500.000", "500 000" o "1 021 600 000" (un "1" pegado a
         # un fijo) podrian ser un telefono.
-        if not con_moneda and (ultimo < 3 or m.group(1) == " "):
+        # Con puntos o comas y terminado en "000.000" tampoco hay duda: ningun telefono termina en
+        # seis ceros ("Precio 980.000.000", "Precio 21.000.000").
+        seis_ceros = m.group(1) != " " and ultimo >= 2 and grupos[ultimo - 1] == "000"
+        if not con_moneda and not seis_ceros and (ultimo < 3 or m.group(1) == " "):
             return m.group()
         resto = m.group(1).join(grupos[ultimo + 1:])
         return _CORTE + (m.group(1) + resto if resto else "")

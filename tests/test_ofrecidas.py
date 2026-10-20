@@ -663,3 +663,24 @@ def test_parece_telefono_respeta_mas_formas_de_precio(txt):
 def test_monto_con_espacios_sin_moneda_frena():
     # "Precio: 1 050 000 000" no se distingue de "Calle 1 021 600 000": ante la duda, frena.
     assert ofrecidas.parece_telefono("Precio: 1 050 000 000")
+
+
+@pytest.mark.parametrize("txt", [
+    "Precio 980.000.000", "Precio 975.000.000 negociable", "Casa 980.000.000 3 dorm", "Contado 965.000.000",
+    "Precio: 970.000.000.-", "Gs: 980.000.000", "Gs.- 980.000.000", "G. 980.000.000", "₲ 980.000.000",
+    "Precio 21.000.000",
+])
+def test_parece_telefono_respeta_precios_redondos_sin_moneda_reconocida(txt):
+    assert not ofrecidas.parece_telefono(txt)
+
+
+def test_precio_21_millones_no_redondo_sin_moneda_frena():
+    # "21.500.000" es tambien un fijo de Asuncion escrito con puntos: ante la duda, frena.
+    assert ofrecidas.parece_telefono("Precio 21.500.000 negociable")
+
+
+def test_muchos_montos_no_es_cuadratico():
+    import time
+    t0 = time.perf_counter()
+    assert not ofrecidas.parece_telefono(" ".join(["Gs. 1.000.000"] * 3000))
+    assert time.perf_counter() - t0 < 15
