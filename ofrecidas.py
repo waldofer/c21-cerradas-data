@@ -7,6 +7,7 @@ Privacidad: el export trae datos del propietario y columnas comerciales. Nada de
 eso puede salir de aca; la salida se arma SIEMPRE desde la lista blanca `CAMPOS`.
 """
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -45,9 +46,10 @@ def parse_precio(s):
     # Formato paraguayo: punto de miles, coma decimal.
     numero = numero.replace(".", "").replace(",", ".")
     try:
-        return float(numero), moneda
+        valor = float(numero)
     except ValueError:
         return None
+    return (valor, moneda) if math.isfinite(valor) else None  # sin NaN / inf
 
 
 def validar_columnas(header):
@@ -59,27 +61,46 @@ def validar_columnas(header):
     return None
 
 
-# Celulares paraguayos: prefijo opcional (+595 / 595 / 0) y separadores opcionales.
-_RE_CELULAR = re.compile(
-    # Con prefijo (+595 / 595 / 0): basta que no sea cola de otro numero pegado.
-    r"[\s-]*(?:(?<!\d)(?:\+?595[\s-]?|0)9\d{2}"
-    # Sin prefijo: solo 96x-99x, y no como tramo de un numero mas largo (p. ej. un precio con espacios).
-    r"|(?<!\d)(?<!\d[\s-])9[6-9]\d)"
-    r"[\s-]?\d{3}[\s-]?\d{3}(?!\d)"
-)
-# Cualquier corrida de 9 o mas digitos seguidos.
-_RE_DIGITOS_LARGOS = re.compile(r"[\s-]*\d{9,}")
+# Separador entre grupos de digitos.
+_S = r"[\s.\-]"
+# Cuerpo de un telefono: 6 digitos en 3+3 o en 2+2+2, que no sean cola de otro numero.
+_CUERPO = rf"(?:{_S}?\d{{3}}{_S}?\d{{3}}|{_S}?\d{{2}}{_S}?\d{{2}}{_S}?\d{{2}})(?!\d)"
+# Igual pero sin puntos (para formas sin prefijo, que se confunden con precios "Gs. 1.981.123.456").
+_CUERPO_SIN_PUNTOS = r"(?:[\s-]?\d{3}[\s-]?\d{3}|[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2})(?!\d)"
+# Ni pegado a otro numero ni como tramo de un numero agrupado ("1 050 000 000", "1.025.000.000").
+_SUELTO = r"(?<!\d)(?<!\d[\s.,\-])"
+
+# Patrones que se borran del texto libre, en orden. Cada uno arranca comiendo los separadores
+# previos para no dejar guiones colgando ("Casa 12-0981-123-456" -> "Casa 12").
+_PATRONES_TELEFONO = tuple(re.compile(p) for p in (
+    # Emails.
+    r"[\s-]*\S+@\S+\.\w+",
+    # Celulares con prefijo (+595 / 595 / 0, con o sin parentesis): basta que no sea cola de otro
+    # numero pegado ("Mz 5 0981 123 456" -> "Mz 5").
+    rf"[\s-]*(?<!\d)\(?(?:\+?595{_S}?|0)9\d{{2}}\)?{_CUERPO}",
+    # Celulares sin prefijo: solo 96x-99x, sueltos y sin puntos.
+    rf"[\s-]*{_SUELTO}9[6-9]\d{_CUERPO_SIN_PUNTOS}",
+    # Fijos con codigo de area y 0 (021, 061, 0521...), sueltos.
+    rf"[\s-]*{_SUELTO}\(?0[2-8]\d{{1,2}}\)?{_CUERPO}",
+    # Fijos con +595 / 595 y codigo de area sin 0 (21, 61, 521...).
+    rf"[\s-]*(?<![\d.,])\(?\+?595\)?{_S}?\(?0?[2-8]\d{{1,2}}\)?{_CUERPO}",
+    # Fijo de Asuncion sin prefijo: 21 + 6 digitos, suelto y sin puntos ni comas que lo
+    # pegen a otro numero ("Gs.21612345", "21612345,50" quedan; un punto final no molesta).
+    rf"[\s-]*{_SUELTO}(?<![.,])21[\s-]?\d{{3}}[\s-]?\d{{3}}(?!\d)(?![.,]\d)",
+    # Cualquier corrida de 9 o mas digitos seguidos.
+    r"[\s-]*\d{9,}",
+))
 
 
 def quitar_telefonos(v):
     """Saca telefonos del texto libre (DIRECCION, ENCABEZADO). None si el campo queda vacio.
 
-    No toca precios con puntos de miles ni numeros cortos.
+    Saca celulares, fijos y emails. No toca precios con puntos de miles ni numeros cortos.
     """
     if v is None:
         return None
-    v = _RE_CELULAR.sub(" ", v)
-    v = _RE_DIGITOS_LARGOS.sub(" ", v)
+    for patron in _PATRONES_TELEFONO:
+        v = patron.sub(" ", v)
     v = re.sub(r"\s+", " ", v).strip()
     return v or None
 
@@ -93,11 +114,12 @@ def _texto(v):
 
 
 def _numero(v):
-    """Celda de texto/numero -> float, o None si esta vacia o no es un numero."""
+    """Celda de texto/numero -> float, o None si esta vacia, no es un numero o no es finito."""
     try:
-        return float(_texto(v))
+        valor = float(_texto(v))
     except (TypeError, ValueError):
         return None
+    return valor if math.isfinite(valor) else None
 
 
 def parsear_ofrecidas(path: Path) -> list[dict]:
@@ -219,9 +241,9 @@ def guardar_ofrecidas(registros: list[dict], path: Path = OFRECIDAS_PATH) -> Non
     path = Path(path)
     ordenados = sorted(registros, key=lambda r: r["id"])
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(
-        json.dumps(ordenados, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
-    )
+    # allow_nan=False: un NaN/inf no es JSON valido; mejor fallar que publicar un archivo roto.
+    texto = json.dumps(ordenados, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    tmp.write_text(texto, encoding="utf-8")
     tmp.replace(path)
 
 
@@ -250,6 +272,35 @@ def _header(ruta: Path) -> tuple:
         wb.close()
 
 
+# Estatus que tiene que traer cada fila del export de ofrecidas.
+ESTATUS_ESPERADO = "enPromocion"
+# Mas nuevas que esto en una semana (con semana anterior) es una descarga inflada.
+LIMITE_NUEVAS_OFRECIDAS = 1500
+
+
+def estatus_inesperados(ruta: Path) -> int:
+    """Cantidad de filas con ID cuyo ESTATUS no es enPromocion (o falta la columna).
+
+    El ESTATUS solo se usa para validar; no sale del modulo.
+    """
+    wb = openpyxl.load_workbook(ruta, read_only=True, data_only=True)
+    try:
+        filas = wb.active.iter_rows(values_only=True)
+        header = next(filas, None) or ()
+        idx = {str(h).strip(): i for i, h in enumerate(header) if h}
+        i_id, i_est = idx.get("ID"), idx.get("ESTATUS")
+        n = 0
+        for fila in filas:
+            if i_id is None or i_id >= len(fila) or _texto(fila[i_id]) is None:
+                continue
+            estatus = _texto(fila[i_est]) if i_est is not None and i_est < len(fila) else None
+            if estatus != ESTATUS_ESPERADO:
+                n += 1
+        return n
+    finally:
+        wb.close()
+
+
 def procesar_ofrecidas(
     ruta_export: Path, anteriores: list[dict], vendidas_por_id: dict[int, dict]
 ) -> tuple[list[dict] | None, dict | None, str | None]:
@@ -266,10 +317,22 @@ def procesar_ofrecidas(
         return None, None, str(e)
     if not descargadas:
         return None, None, "El export de ofrecidas no trajo ninguna propiedad valida."
+    otros = estatus_inesperados(ruta_export)
+    if otros:
+        return None, None, (
+            f"El export de ofrecidas trae {otros} filas con estatus distinto de "
+            f"{ESTATUS_ESPERADO}; no se publica."
+        )
     alerta = descarga_sospechosa(len(descargadas), len(anteriores))
     if alerta:
         return None, None, alerta
     resultado = comparar(anteriores, descargadas, vendidas_por_id)
+    n_nuevas = len(resultado["nuevas"])
+    if anteriores and n_nuevas > LIMITE_NUEVAS_OFRECIDAS:
+        return None, resultado, (
+            f"Las ofrecidas nuevas ({n_nuevas}) superan el limite de seguridad "
+            f"({LIMITE_NUEVAS_OFRECIDAS}); se la considera una descarga inflada."
+        )
     return resultado["ofrecidas"], resultado, None
 
 

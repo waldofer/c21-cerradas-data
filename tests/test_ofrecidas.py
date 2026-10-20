@@ -1,8 +1,12 @@
 import json
 
 import openpyxl
+import pytest
 
+import ofrecidas
 from ofrecidas import (
+    LIMITE_NUEVAS_OFRECIDAS,
+    estatus_inesperados,
     CAMPOS,
     COLUMNAS_REQUERIDAS,
     comparar,
@@ -41,6 +45,7 @@ def fila_valida(**cambios):
     fila = {
         "OFICINA": "CENTURY 21 Demo",
         "ID": "51505",
+        "ESTATUS": "enPromocion",
         "DIRECCION": "Calle Falsa 123",
         "MUNICIPIO": "Asuncion",
         "FECHA ALTA": "2026-07-17",
@@ -297,7 +302,7 @@ def _excel_con(tmp_path, dir_, en):
     ws = wb.active
     ws.append(HEADER)
     fila = {h: None for h in HEADER}
-    fila.update({"ID": 1, "PRECIO": "100.000,00 USD", "M2T": 500, "FECHA ALTA": "2026-01-01",
+    fila.update({"ID": 1, "ESTATUS": "enPromocion", "PRECIO": "100.000,00 USD", "M2T": 500, "FECHA ALTA": "2026-01-01",
                  "MUNICIPIO": "Luque", "DIRECCION": dir_, "ENCABEZADO": en})
     ws.append([fila[h] for h in HEADER])
     ruta = tmp_path / "o.xlsx"
@@ -393,3 +398,102 @@ def test_procesar_ok_devuelve_final_y_resultado(tmp_path):
     assert alerta is None
     assert [r["id"] for r in final] == [1, 2]
     assert [r["id"] for r in resultado["nuevas"]] == [2]
+
+
+# --- Telefonos y emails: formas ampliadas ---
+
+@pytest.mark.parametrize("tel", [
+    # celulares con puntos o parentesis
+    "0981.123.456", "(0981) 123 456", "(0981)123456",
+    # celulares agrupados de a pares
+    "0981 12 34 56", "0985-12-34-56", "981 12 34 56",
+    # fijos con prefijo de area
+    "021 612 345", "021-612345", "(021) 612 345", "+595 21 612345", "595 21 612 345",
+    "061 512 345", "0521 20 30 40",
+    # fijo de Asuncion sin prefijo
+    "21612345", "21 612 345",
+    # emails
+    "juan.perez@example.com", "ventas@inmo.com.py",
+])
+def test_quitar_telefonos_formas_ampliadas(tel):
+    assert quitar_telefonos(f"Villa Gioconda {tel}") == "Villa Gioconda", tel
+    assert quitar_telefonos(f"Llamar {tel} ahora") == "Llamar ahora", tel
+    assert quitar_telefonos(tel) is None, tel
+
+
+@pytest.mark.parametrize("txt", [
+    "Gs. 420.000.000", "Gs. 900 000 000", "USD 150.000", "Gs. 1 981 123 456",
+    "Gs. 1.981.123.456", "Casa 3", "1440", "Calle 5 de Mayo 1234", "Ruta 2 km 21",
+    "Lote 12", "Mz 5", "Gs. 21.612.345", "Gs. 1.050.000.000", "Gs. 1 050 000 000",
+    "Gs. 1.025.000.000", "Gs. 2 080 000 000", "USD 595.000", "Gs. 1.021.612.345",
+    "Casa 2 dormitorios, 21,5 m de frente",
+])
+def test_quitar_telefonos_respeta_formas_ampliadas(txt):
+    assert quitar_telefonos(txt) == txt
+
+
+def test_quitar_telefonos_fijo_21_pegado_a_puntuacion_no_se_toca():
+    assert quitar_telefonos("Gs.21612345") == "Gs.21612345"
+    assert quitar_telefonos("21612345,50") == "21612345,50"
+    assert quitar_telefonos("Llamar al 21 612 345.") == "Llamar al ."
+    assert quitar_telefonos("Tel.021 612 345") == "Tel."
+
+
+# --- Valores no finitos (NaN / inf) ---
+
+@pytest.mark.parametrize("x", ["NaN", "nan", "inf", "-inf", "Infinity"])
+def test_parse_precio_no_finito(x):
+    assert parse_precio(f"{x} USD") is None
+    assert parse_precio(f"{x} PYG") is None
+
+
+@pytest.mark.parametrize("x", ["NaN", "inf", "Infinity"])
+def test_parsear_no_finitos_son_faltantes(tmp_path, x):
+    filas = [
+        fila_valida(ID="1", M2T=x),
+        fila_valida(ID="2", PRECIO=f"{x} USD"),
+        fila_valida(ID="3", LAT=x, LON=x, M2C=x),
+        fila_valida(ID=x),
+    ]
+    (r,) = parsear_ofrecidas(armar_excel(tmp_path, filas))
+    assert r["id"] == 3
+    assert r["la"] is None and r["lo"] is None and r["mc"] is None
+
+
+def test_guardar_ofrecidas_rechaza_nan(tmp_path):
+    destino = tmp_path / "ofrecidas.json"
+    with pytest.raises(ValueError):
+        guardar_ofrecidas([{"id": 1, "pp": float("nan")}], destino)
+    assert not destino.exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+# --- Descarga inflada: estatus y cantidad de nuevas ---
+
+def test_estatus_inesperados(tmp_path):
+    filas = [fila_valida(ID="1"), fila_valida(ID="2", ESTATUS="cerrada"), fila_valida(ID="3", ESTATUS="")]
+    assert estatus_inesperados(armar_excel(tmp_path, filas)) == 2
+    assert estatus_inesperados(armar_excel(tmp_path, [fila_valida(ID="1")])) == 0
+
+
+def test_procesar_alerta_si_hay_estatus_distinto(tmp_path):
+    filas = [fila_valida(ID="1"), fila_valida(ID="2", ESTATUS="cerrada")]
+    final, resultado, alerta = procesar_ofrecidas(armar_excel(tmp_path, filas), [], {})
+    assert final is None
+    assert "enPromocion" in alerta and "1" in alerta
+
+
+def test_limite_nuevas_ofrecidas():
+    assert LIMITE_NUEVAS_OFRECIDAS == 1500
+
+
+def test_procesar_alerta_si_demasiadas_nuevas(tmp_path, monkeypatch):
+    monkeypatch.setattr(ofrecidas, "LIMITE_NUEVAS_OFRECIDAS", 2)
+    ruta = armar_excel(tmp_path, [fila_valida(ID=str(i)) for i in range(1, 5)])
+    final, resultado, alerta = procesar_ofrecidas(ruta, [_registro(1)], {})
+    assert final is None
+    assert len(resultado["nuevas"]) == 3
+    assert "3" in alerta and "2" in alerta
+    # Primera corrida (sin anteriores): no aplica el limite.
+    final, _, alerta = procesar_ofrecidas(ruta, [], {})
+    assert alerta is None and len(final) == 4

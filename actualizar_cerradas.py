@@ -49,7 +49,7 @@ from playwright.sync_api import sync_playwright
 
 from clasificar_precios import clasificar, construir_pool, UMBRAL_GS
 from cotizaciones_bcp import TABLA_PATH, descargar_anho
-from ofrecidas import OFRECIDAS_PATH, escribir_hoja_ofrecidas, guardar_ofrecidas, procesar_ofrecidas
+from ofrecidas import escribir_hoja_ofrecidas, guardar_ofrecidas, procesar_ofrecidas
 
 REPO_DIR = Path(__file__).parent  # asumido: este script vive adentro del repo c21-cerradas-data
 DATASET_PATH = REPO_DIR / "data" / "cerradas.json"
@@ -544,6 +544,21 @@ def vendidas_publicadas() -> dict[int, dict]:
     return {r["id"]: r for r in json.loads(salida)}
 
 
+def ofrecidas_publicadas() -> list[dict]:
+    """Ofrecidas ya publicadas (HEAD:data/ofrecidas.json). Se lee de git y no del disco, igual que
+    las vendidas: una copia local sin commitear no cuenta como semana anterior. [] si no esta en HEAD."""
+    en_head = subprocess.run(
+        ["git", "ls-tree", "--name-only", "HEAD", "--", "data/ofrecidas.json"],
+        cwd=REPO_DIR, check=True, capture_output=True,
+    ).stdout.decode("utf-8").strip()
+    if not en_head:
+        return []
+    salida = subprocess.run(
+        ["git", "show", "HEAD:data/ofrecidas.json"], cwd=REPO_DIR, check=True, capture_output=True
+    ).stdout.decode("utf-8")
+    return json.loads(salida)
+
+
 def git_commit_push_ofrecidas(mensaje: str):
     """Commit + push de data/ofrecidas.json, y solo de ese archivo."""
     subprocess.run(["git", "add", "data/ofrecidas.json"], cwd=REPO_DIR, check=True)
@@ -557,9 +572,11 @@ def git_commit_push_ofrecidas(mensaje: str):
     subprocess.run(["git", "push"], cwd=REPO_DIR, check=True)
 
 
-def actualizar_ofrecidas() -> None:
+def actualizar_ofrecidas() -> bool:
+    """Corre las ofrecidas sin dejar escapar excepciones. False si la corrida fallo (excepcion);
+    True si termino, aunque una guarda haya frenado la publicacion (eso queda como alerta)."""
     hoy = datetime.now().strftime("%Y-%m-%d")
-    resultado, alerta = None, None
+    resultado, alerta, ok = None, None, True
     try:
         print(f"Ofrecidas: exportando enPromocion desde 2015-01-01 hasta {hoy}.")
         with sync_playwright() as p:
@@ -572,10 +589,9 @@ def actualizar_ofrecidas() -> None:
             )
             browser.close()
 
-        anteriores = []
-        if OFRECIDAS_PATH.exists():
-            anteriores = json.loads(OFRECIDAS_PATH.read_text(encoding="utf-8"))
-        final, resultado, alerta = procesar_ofrecidas(ruta_export, anteriores, vendidas_publicadas())
+        final, resultado, alerta = procesar_ofrecidas(
+            ruta_export, ofrecidas_publicadas(), vendidas_publicadas()
+        )
         if alerta:
             print(f"ALERTA ofrecidas: {alerta} No se toco data/ofrecidas.json.")
         else:
@@ -588,6 +604,7 @@ def actualizar_ofrecidas() -> None:
                 f"Actualización semanal ofrecidas {hoy}: +{nuevas} nuevas, {vendidas} vendidas, {bajas} bajas"
             )
     except Exception as e:
+        ok = False
         alerta = f"Fallo la corrida de ofrecidas: {type(e).__name__}: {e}"
         print(f"ALERTA ofrecidas: {alerta}")
         traceback.print_exc()
@@ -596,20 +613,54 @@ def actualizar_ofrecidas() -> None:
             escribir_hoja_ofrecidas(RESUMEN_PATH, resultado, alerta)
         finally:
             DESCARGA_OFRECIDAS_TMP.unlink(missing_ok=True)
+    return ok
+
+
+def _motivo_seguro(e: Exception) -> str:
+    """Tipo + mensaje de la excepcion, pero el mensaje solo si es de login / red / archivo:
+    un ValueError del parseo podria traer el valor de una celda."""
+    seguro = (
+        type(e) is Exception  # login() levanta Exception con la URL
+        or isinstance(e, OSError)  # incluye TimeoutError y ConnectionError
+        or type(e).__module__.startswith("playwright")
+    )
+    return f"{type(e).__name__}: {e}" if seguro else type(e).__name__
+
+
+def _total_cerradas_actual() -> int:
+    try:
+        return len(cargar_dataset_actual())
+    except Exception:
+        return 0
 
 
 def main():
     # Cada parte va aislada: si las vendidas fallan, las ofrecidas corren igual.
+    # Si alguna fallo, al final se sale con codigo 1 para que el programador de tareas lo marque.
     if "--solo-ofrecidas" in sys.argv[1:]:
         pasos = [actualizar_ofrecidas]
     else:
         pasos = [actualizar_vendidas, actualizar_ofrecidas]
+    fallas = []
     for paso in pasos:
         try:
-            paso()
-        except Exception:
+            if paso() is False:
+                fallas.append(paso.__name__)
+        except Exception as e:
+            fallas.append(paso.__name__)
             print(f"ERROR en {paso.__name__}:")
             traceback.print_exc()
+            if paso is actualizar_vendidas:
+                # Resumen nuevo con la alerta ANTES de las ofrecidas, que le agregan su hoja.
+                fecha_hoy = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                try:
+                    escribir_resumen_excel(fecha_hoy, 0, 0, _total_cerradas_actual(), [],
+                                           alerta=f"Fallo vendidas: {_motivo_seguro(e)}")
+                except Exception:
+                    traceback.print_exc()
+    if fallas:
+        print(f"Termino con fallas en: {', '.join(fallas)}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
