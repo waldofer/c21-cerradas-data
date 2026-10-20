@@ -274,6 +274,13 @@ def test_quitar_telefonos_campo_solo_telefono_queda_none():
     assert quitar_telefonos("   ") is None
 
 
+def test_quitar_telefonos_sin_prefijo():
+    for tel in ["981 123 456", "971-234-567", "991 000 111", "961-222 333"]:
+        assert quitar_telefonos(f"Luque {tel}") == "Luque", tel
+    for txt in ["Gs. 900 000 000", "USD 150 000", "Gs. 1 981 123 456", "Gs. 800 000 000"]:
+        assert quitar_telefonos(txt) == txt
+
+
 def _excel_con(tmp_path, dir_, en):
     wb = openpyxl.Workbook()
     ws = wb.active
