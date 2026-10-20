@@ -497,3 +497,68 @@ def test_procesar_alerta_si_demasiadas_nuevas(tmp_path, monkeypatch):
     # Primera corrida (sin anteriores): no aplica el limite.
     final, _, alerta = procesar_ofrecidas(ruta, [], {})
     assert alerta is None and len(final) == 4
+
+
+# --- Barrera antes de publicar: nada con pinta de telefono en dir/en ---
+
+@pytest.mark.parametrize("txt", [
+    # formas que el filtro no limpia y la barrera tiene que frenar
+    "Calle 1 021 6123456", "Calle 1 (021) 612 3456", "Calle 1 +595 21 6123456",
+    "Calle 1 0981/123456", "Calle 1 981/123456", "Calle 1 098 1123456",
+    "Calle 1 0981 0123456",
+    # fijo de Asuncion sin el 0
+    "Concordia 388 21612345", "Calle 1 21 612 345", "Calle 1 21-612345",
+    # y las que el filtro limpia, por si alguna se escapara
+    "Calle 1 0981123456", "Calle 1 123456789", "contacto a@b.com",
+])
+def test_parece_telefono_detecta(txt):
+    assert ofrecidas.parece_telefono(txt)
+
+
+@pytest.mark.parametrize("txt", [
+    "Gs. 420.000.000", "Gs. 1 050 000 000", "Gs. 900 000 000", "USD 150.000",
+    "2021 2022", "Ruta 2 km 21 600 m", "Mcal. Lopez 2160", "12/05/2021",
+    "-25.2674758, -57.5747106", "-59.5123456",
+    # codigos postales de 6 digitos (con y sin numero de casa), como vienen en los datos reales
+    "Concordia 388, Asuncion 001204 388", "SAN JUAN BAUTISTA 080106 080106",
+    "", None,
+])
+def test_parece_telefono_respeta(txt):
+    assert not ofrecidas.parece_telefono(txt)
+
+
+def test_telefonos_residuales_devuelve_ids():
+    regs = [_registro(1), _registro(2), _registro(3)]
+    regs[1]["dir"] = "Calle 2 021 6123456"
+    regs[2]["en"] = "Llamar 0981/123456"
+    assert ofrecidas.telefonos_residuales(regs) == [2, 3]
+
+
+def test_procesar_frena_si_queda_algo_con_pinta_de_telefono(tmp_path):
+    filas = [fila_valida(ID="1"), fila_valida(ID="2", DIRECCION="Calle 2 021 6123456")]
+    final, resultado, alerta = procesar_ofrecidas(armar_excel(tmp_path, filas), [_registro(1)], {})
+    assert final is None
+    assert resultado is not None  # la hoja del resumen igual muestra los totales
+    assert "2" in alerta and "telefono" in alerta.lower()
+    assert "6123456" not in alerta  # la alerta da IDs, nunca el texto
+
+
+def test_guardar_ofrecidas_se_niega_si_queda_algo_con_pinta_de_telefono(tmp_path):
+    destino = tmp_path / "ofrecidas.json"
+    reg = _registro(7)
+    reg["dir"] = "Calle 7 0981/123456"
+    with pytest.raises(ValueError):
+        guardar_ofrecidas([reg], destino)
+    assert not destino.exists()
+
+
+@pytest.mark.parametrize("txt", [
+    "Gs. 1 050 000 000", "Gs 2 021 612 345", "precio 1 050 000 000 Gs", "USD 1 098 123",
+])
+def test_parece_telefono_respeta_montos_con_espacios(txt):
+    assert not ofrecidas.parece_telefono(txt)
+
+
+def test_parece_telefono_sin_moneda_frena_aunque_parezca_monto():
+    # Sin moneda al lado no hay forma de saber: se frena (mejor una semana que el historial).
+    assert ofrecidas.parece_telefono("Calle 1 021 612 345")

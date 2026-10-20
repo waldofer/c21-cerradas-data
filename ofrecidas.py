@@ -105,6 +105,70 @@ def quitar_telefonos(v):
     return v or None
 
 
+# --- Barrera antes de publicar ---
+# El filtro de arriba borra lo que reconoce. Esta barrera es mas desconfiada: si en dir/en queda
+# algo con pinta de telefono (aunque sea una forma que el filtro no conoce), no se publica nada.
+# Preferimos frenar una semana a tener que reescribir el historial del repo publico.
+
+# Tramo numerico: digitos con espacios, guiones, barras, puntos o parentesis en el medio.
+_RE_TRAMO = re.compile(r"(?<![\d.,])\+?\(?\d[\d\s\-/().]*\d")
+# Codigo postal paraguayo (6 digitos que empiezan con 0), que el geocodificador agrega a la
+# direccion: "Asuncion 001204 388", "SAN JUAN BAUTISTA 080106 080106".
+_RE_CODIGO_POSTAL = re.compile(r"0\d{5}")
+
+
+# Monto con miles separados por espacio ("1 050 000 000"), y la moneda que lo delata.
+_RE_MILES_CON_ESPACIO = re.compile(r"\d{1,3}(?: \d{3})+")
+_RE_MONEDA_ANTES = re.compile(r"(?:gs\.?|usd|pyg|u\$s|\$)\s*$", re.IGNORECASE)
+_RE_MONEDA_DESPUES = re.compile(r"^\s*(?:gs\b|usd\b|pyg\b|guaran|millones|mill\b)", re.IGNORECASE)
+
+
+def _tramo_parece_telefono(tramo: str) -> bool:
+    digitos = re.sub(r"\D", "", tramo)
+    # Con prefijo 0 o 595 y 9+ digitos: celular o fijo, como sea que este separado.
+    # (595 con puntos no: "-59.5123456" es una coordenada del Chaco.)
+    if len(digitos) >= 9 and (
+        digitos.startswith("0") or (digitos.startswith("595") and "." not in tramo)
+    ):
+        return True
+    if "." in tramo:
+        return False
+    # Celular sin prefijo (96x-99x + 6 digitos) o fijo de Asuncion sin 0 (21 + 6 digitos).
+    return (len(digitos) == 9 and digitos[0] == "9" and digitos[1] in "6789") or (
+        len(digitos) == 8 and digitos.startswith("21")
+    )
+
+
+def parece_telefono(texto) -> bool:
+    """True si el texto tiene un email o algo que podria ser un telefono."""
+    if not texto:
+        return False
+    if "@" in texto or re.search(r"\d{9,}", texto):
+        return True
+    for m in _RE_TRAMO.finditer(texto):
+        if _RE_MILES_CON_ESPACIO.fullmatch(m.group()) and (
+            _RE_MONEDA_ANTES.search(texto[: m.start()]) or _RE_MONEDA_DESPUES.match(texto[m.end():])
+        ):
+            continue  # es un monto ("Gs. 1 050 000 000")
+        # El telefono puede empezar en cualquier grupo del tramo ("Calle 1 021 6123456"), salvo
+        # los codigos postales, que se saltean.
+        grupos = [g for g in m.group().split() if not _RE_CODIGO_POSTAL.fullmatch(g)]
+        for i in range(len(grupos)):
+            for j in range(i + 1, len(grupos) + 1):
+                if _tramo_parece_telefono(" ".join(grupos[i:j])):
+                    return True
+    return False
+
+
+def telefonos_residuales(registros: list[dict]) -> list[int]:
+    """IDs de los registros cuya direccion o titulo tiene algo con pinta de telefono."""
+    return [r["id"] for r in registros if parece_telefono(r.get("dir")) or parece_telefono(r.get("en"))]
+
+
+def _lista_ids(ids: list[int], tope: int = 20) -> str:
+    return ", ".join(str(i) for i in ids[:tope]) + (" ..." if len(ids) > tope else "")
+
+
 def _texto(v):
     """Celda -> str sin espacios, o None si esta vacia."""
     if v is None:
@@ -239,6 +303,13 @@ CERRADAS_PATH = Path(__file__).parent / "data" / "cerradas.json"
 def guardar_ofrecidas(registros: list[dict], path: Path = OFRECIDAS_PATH) -> None:
     """JSON compacto ordenado por id. Escribe a .tmp y reemplaza, para no dejar un archivo roto."""
     path = Path(path)
+    # Ultimo cerrojo: aunque alguien llame a esto sin pasar por procesar_ofrecidas (ej. `inicial`).
+    sospechosos = telefonos_residuales(registros)
+    if sospechosos:
+        raise ValueError(
+            f"No se guarda ofrecidas.json: {len(sospechosos)} propiedades tienen algo con pinta de "
+            f"telefono en la direccion o el titulo. IDs: {_lista_ids(sospechosos)}"
+        )
     ordenados = sorted(registros, key=lambda r: r["id"])
     tmp = path.with_name(path.name + ".tmp")
     # allow_nan=False: un NaN/inf no es JSON valido; mejor fallar que publicar un archivo roto.
@@ -332,6 +403,13 @@ def procesar_ofrecidas(
         return None, resultado, (
             f"Las ofrecidas nuevas ({n_nuevas}) superan el limite de seguridad "
             f"({LIMITE_NUEVAS_OFRECIDAS}); se la considera una descarga inflada."
+        )
+    sospechosos = telefonos_residuales(resultado["ofrecidas"])
+    if sospechosos:
+        return None, resultado, (
+            f"{len(sospechosos)} propiedades tienen en la direccion o el titulo algo con pinta de "
+            f"telefono que el filtro no limpio; esta semana no se publica. Revisar estos IDs en "
+            f"21online y ampliar el filtro: {_lista_ids(sospechosos)}"
         )
     return resultado["ofrecidas"], resultado, None
 
