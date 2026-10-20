@@ -6,6 +6,8 @@ from ofrecidas import (
     CAMPOS,
     COLUMNAS_REQUERIDAS,
     comparar,
+    escribir_hoja_ofrecidas,
+    procesar_ofrecidas,
     descarga_sospechosa,
     quitar_telefonos,
     guardar_ofrecidas,
@@ -308,3 +310,86 @@ def test_parsear_ofrecidas_quita_telefonos_de_dir_y_en(tmp_path):
     (r,) = parsear_ofrecidas(ruta)
     assert r["dir"] is None
     assert r["en"] == "Terreno en Luque"
+
+
+# --- Hoja "Ofrecidas" del resumen y procesar_ofrecidas ---
+
+def _registro(i, pp=100000.0, mon="USD"):
+    return {"id": i, "mu": "Luque", "ti": "Casa", "su": "Casa", "dir": f"Calle {i}", "en": None,
+            "of": "C21", "pp": pp, "mon": mon, "mt": 300.0, "mc": 100.0, "fa": "2026-01-01",
+            "la": None, "lo": None}
+
+
+def _resultado_demo():
+    return {
+        "ofrecidas": [_registro(1), _registro(2)],
+        "nuevas": [_registro(2)],
+        "pasaron_a_vendidas": [
+            {"id": 77, "dir": "Av. Vendida 9", "mu": "Asuncion", "pp": 90000.0, "mon": "USD", "pr_cierre": 85000.0}
+        ],
+        "dadas_de_baja": [_registro(5)],
+        "cambios_precio": [
+            {"id": 1, "antes": (120000.0, "USD"), "despues": (100000.0, "USD")},
+            {"id": 77, "antes": (95000.0, "USD"), "despues": (90000.0, "USD")},
+        ],
+        "en_venta_antes": 4,
+    }
+
+
+def _celdas(ws):
+    return [c for fila in ws.iter_rows(values_only=True) for c in fila if c is not None]
+
+
+def test_hoja_ofrecidas_ok(tmp_path):
+    ruta = tmp_path / "resumen.xlsx"
+    escribir_hoja_ofrecidas(ruta, _resultado_demo(), None)
+    escribir_hoja_ofrecidas(ruta, _resultado_demo(), None)  # idempotente: reemplaza la hoja
+    wb = openpyxl.load_workbook(ruta)
+    assert wb.sheetnames.count("Ofrecidas") == 1
+    celdas = _celdas(wb["Ofrecidas"])
+    assert "OK" in celdas
+    assert 77 in celdas  # pasaron a vendidas
+    assert 85000.0 in celdas  # precio de cierre
+    assert 120000.0 in celdas and 100000.0 in celdas  # antes / despues del cambio de precio
+    assert 1 in celdas
+    # El cambio de precio de una vendida es ruido: no va a la tabla de cambios.
+    assert 95000.0 not in celdas
+
+
+def test_hoja_ofrecidas_alerta(tmp_path):
+    ruta = tmp_path / "resumen.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.title = "Resumen"
+    wb.save(ruta)
+    escribir_hoja_ofrecidas(ruta, None, "x")
+    wb = openpyxl.load_workbook(ruta)
+    assert "Resumen" in wb.sheetnames
+    assert "ALERTA - x" in _celdas(wb["Ofrecidas"])
+
+
+def test_procesar_no_toca_nada_si_sospechosa(tmp_path):
+    anteriores = [_registro(i) for i in range(1, 11)]
+    ruta = armar_excel(tmp_path, [fila_valida(ID=str(i)) for i in (1, 2, 3)])
+    final, resultado, alerta = procesar_ofrecidas(ruta, anteriores, {})
+    assert final is None
+    assert alerta
+
+
+def test_procesar_columnas_invalidas(tmp_path):
+    ruta = armar_excel(tmp_path, [fila_valida()])
+    wb = openpyxl.load_workbook(ruta)
+    ws = wb.active
+    col = [c.value for c in ws[1]].index("PRECIO") + 1
+    ws.delete_cols(col)
+    wb.save(ruta)
+    final, resultado, alerta = procesar_ofrecidas(ruta, [], {})
+    assert (final, resultado) == (None, None)
+    assert "PRECIO" in alerta
+
+
+def test_procesar_ok_devuelve_final_y_resultado(tmp_path):
+    ruta = armar_excel(tmp_path, [fila_valida(ID="1"), fila_valida(ID="2")])
+    final, resultado, alerta = procesar_ofrecidas(ruta, [_registro(1)], {})
+    assert alerta is None
+    assert [r["id"] for r in final] == [1, 2]
+    assert [r["id"] for r in resultado["nuevas"]] == [2]

@@ -21,9 +21,15 @@ Flujo:
 5. Upsert por ID sobre el dataset acumulado (los IDs nuevos se agregan,
    los existentes se actualizan si cambiaron)
 6. Commit + push al repo c21-cerradas-data
+7. Ofrecidas: despues de las vendidas (y aislada de ellas: si una falla, la otra
+   corre igual) exporta las propiedades ofrecidas (estatus enPromocion), las cruza
+   con la semana anterior y con las vendidas ya publicadas, y actualiza
+   data/ofrecidas.json (commit + push de ese unico archivo). La hoja "Ofrecidas"
+   de resumen_actualizacion.xlsx deja el estado de la corrida.
 
 Uso:
-    python actualizar_cerradas.py
+    python actualizar_cerradas.py                   # vendidas + ofrecidas
+    python actualizar_cerradas.py --solo-ofrecidas  # solo ofrecidas
 
 Requiere: playwright, openpyxl, git configurado con acceso de push al repo.
 """
@@ -32,7 +38,9 @@ import json
 import re
 import subprocess
 import os
+import sys
 import time
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -41,11 +49,15 @@ from playwright.sync_api import sync_playwright
 
 from clasificar_precios import clasificar, construir_pool, UMBRAL_GS
 from cotizaciones_bcp import TABLA_PATH, descargar_anho
+from ofrecidas import OFRECIDAS_PATH, escribir_hoja_ofrecidas, guardar_ofrecidas, procesar_ofrecidas
 
 REPO_DIR = Path(__file__).parent  # asumido: este script vive adentro del repo c21-cerradas-data
 DATASET_PATH = REPO_DIR / "data" / "cerradas.json"
 DESCARGA_TMP = REPO_DIR / "_tmp_export.xlsx"
 RESUMEN_PATH = REPO_DIR / "resumen_actualizacion.xlsx"
+DESCARGA_OFRECIDAS_TMP = REPO_DIR / "_tmp_export_ofrecidas.xlsx"
+OFRECIDAS_TIMEOUT_GOTO_MS = 1_800_000  # medido 2026-10-19: ~16 min en cargar
+OFRECIDAS_LIMITE_ESTABLE_S = 900
 
 TC_APROX = 6100  # Gs por USD, fallback si algún PRECIO viene en PYG sin más contexto
 MARGEN_DIAS = 14  # relee los últimos N días por si hubo cargas tardías
@@ -79,14 +91,19 @@ JS_EXTRAER_TABLA = """
 BASE_URL = "https://21online.century21.com.py"
 
 
-def construir_url_busqueda(fecha_desde: str, fecha_hasta: str) -> str:
+def construir_url_busqueda(fecha_desde: str, fecha_hasta: str, estatus: str = "cerrada") -> str:
+    # Cerradas se filtran por mes de cierre; las ofrecidas (enPromocion) por fecha de alta.
+    clave_desde, clave_hasta = (
+        ("fechaAltaDesde", "fechaAltaHasta") if estatus == "enPromocion"
+        else ("mesCierreDesde", "mesCierreHasta")
+    )
     params = {
         "oficinaStatus": "todas",
         "oficina": "",
-        "estatus": "cerrada",
+        "estatus": estatus,
         "tipoOperacion": "venta",
-        "mesCierreDesde": fecha_desde,
-        "mesCierreHasta": fecha_hasta,
+        clave_desde: fecha_desde,
+        clave_hasta: fecha_hasta,
         "cantidad": "30000",
         "conFoto": "1",
     }
@@ -147,7 +164,9 @@ def login(page, max_intentos: int = 3):
             raise Exception(f"Login C21 fallido tras {max_intentos} intentos — URL: {page.url}")
 
 
-def exportar_reporte(page, fecha_desde: str, fecha_hasta: str) -> Path:
+def exportar_reporte(page, fecha_desde: str, fecha_hasta: str, estatus: str = "cerrada",
+                     destino: Path = DESCARGA_TMP, timeout_goto_ms: int = 300000,
+                     limite_estable_s: int = 480) -> Path:
     """
     Lee la tabla jQuery DataTables ya cargada en la página (mismo método que el
     script de consola de EXPORTAR_CERRADAS.md) y arma el Excel localmente.
@@ -159,13 +178,16 @@ def exportar_reporte(page, fecha_desde: str, fecha_hasta: str) -> Path:
     # El filtro mesCierreDesde de 21online es por mes: con un "desde" que no es dia 1 devuelve
     # 0 filas (medido: 2026-10-02 -> 0, 2026-10-01 -> 47). Se arranca siempre desde el dia 1;
     # las filas de mas son inocuas porque upsert() es por ID.
-    url = construir_url_busqueda(fecha_desde[:8] + "01", fecha_hasta)
+    if estatus == "enPromocion":
+        url = construir_url_busqueda(fecha_desde, fecha_hasta, estatus)  # fecha de alta: sin ajuste a dia 1
+    else:
+        url = construir_url_busqueda(fecha_desde[:8] + "01", fecha_hasta)
     # La página puede tardar bastante (medido: hasta ~230s con el histórico completo,
     # ~110s en rangos chicos) y a veces recarga sola antes de mostrar los datos finales:
     # se espera a que el conteo de filas se estabilice en vez de confiar en un selector.
-    page.goto(url, wait_until="networkidle", timeout=300000)
+    page.goto(url, wait_until="networkidle", timeout=timeout_goto_ms)
     previo, estables = -1, 0
-    limite = time.time() + 480
+    limite = time.time() + limite_estable_s
     while time.time() < limite and estables < 3:
         try:
             n = page.evaluate(JS_CONTAR_FILAS)
@@ -184,8 +206,8 @@ def exportar_reporte(page, fecha_desde: str, fecha_hasta: str) -> Path:
     ws.append(resultado["headers"])
     for fila in resultado["data"]:
         ws.append(fila)
-    wb.save(DESCARGA_TMP)
-    return DESCARGA_TMP
+    wb.save(destino)
+    return destino
 
 
 def parse_money_usd(s):
@@ -455,7 +477,7 @@ def escribir_resumen_excel(fecha: str, agregados: int, actualizados: int, total:
     wb.save(RESUMEN_PATH)
 
 
-def main():
+def actualizar_vendidas():
     dataset = cargar_dataset_actual()
     total_previo = len(dataset)
     fecha_desde = fecha_de_corte(dataset)
@@ -511,6 +533,83 @@ def main():
                            alerta=alerta, conteos_precio=conteos_precio,
                            diagnosticos=diagnosticos_precio)
     ruta_export.unlink(missing_ok=True)
+
+
+def vendidas_publicadas() -> dict[int, dict]:
+    """Vendidas ya publicadas (HEAD:data/cerradas.json), por id. Se lee de git y no del disco:
+    si el push de vendidas quedo frenado por una alerta, lo no publicado no cuenta."""
+    salida = subprocess.run(
+        ["git", "show", "HEAD:data/cerradas.json"], cwd=REPO_DIR, check=True, capture_output=True
+    ).stdout.decode("utf-8")
+    return {r["id"]: r for r in json.loads(salida)}
+
+
+def git_commit_push_ofrecidas(mensaje: str):
+    """Commit + push de data/ofrecidas.json, y solo de ese archivo."""
+    subprocess.run(["git", "add", "data/ofrecidas.json"], cwd=REPO_DIR, check=True)
+    resultado = subprocess.run(
+        ["git", "diff", "--cached", "--quiet", "--", "data/ofrecidas.json"], cwd=REPO_DIR
+    )
+    if resultado.returncode == 0:
+        print("Ofrecidas: sin cambios para commitear.")
+        return
+    subprocess.run(["git", "commit", "-m", mensaje, "--", "data/ofrecidas.json"], cwd=REPO_DIR, check=True)
+    subprocess.run(["git", "push"], cwd=REPO_DIR, check=True)
+
+
+def actualizar_ofrecidas() -> None:
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    resultado, alerta = None, None
+    try:
+        print(f"Ofrecidas: exportando enPromocion desde 2015-01-01 hasta {hoy}.")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            login(page)
+            ruta_export = exportar_reporte(
+                page, "2015-01-01", hoy, estatus="enPromocion", destino=DESCARGA_OFRECIDAS_TMP,
+                timeout_goto_ms=OFRECIDAS_TIMEOUT_GOTO_MS, limite_estable_s=OFRECIDAS_LIMITE_ESTABLE_S,
+            )
+            browser.close()
+
+        anteriores = []
+        if OFRECIDAS_PATH.exists():
+            anteriores = json.loads(OFRECIDAS_PATH.read_text(encoding="utf-8"))
+        final, resultado, alerta = procesar_ofrecidas(ruta_export, anteriores, vendidas_publicadas())
+        if alerta:
+            print(f"ALERTA ofrecidas: {alerta} No se toco data/ofrecidas.json.")
+        else:
+            guardar_ofrecidas(final)
+            nuevas, vendidas, bajas = (
+                len(resultado["nuevas"]), len(resultado["pasaron_a_vendidas"]), len(resultado["dadas_de_baja"])
+            )
+            print(f"Ofrecidas: {len(final)} en venta | +{nuevas} nuevas, {vendidas} vendidas, {bajas} bajas.")
+            git_commit_push_ofrecidas(
+                f"Actualización semanal ofrecidas {hoy}: +{nuevas} nuevas, {vendidas} vendidas, {bajas} bajas"
+            )
+    except Exception as e:
+        alerta = f"Fallo la corrida de ofrecidas: {type(e).__name__}: {e}"
+        print(f"ALERTA ofrecidas: {alerta}")
+        traceback.print_exc()
+    finally:
+        try:
+            escribir_hoja_ofrecidas(RESUMEN_PATH, resultado, alerta)
+        finally:
+            DESCARGA_OFRECIDAS_TMP.unlink(missing_ok=True)
+
+
+def main():
+    # Cada parte va aislada: si las vendidas fallan, las ofrecidas corren igual.
+    if "--solo-ofrecidas" in sys.argv[1:]:
+        pasos = [actualizar_ofrecidas]
+    else:
+        pasos = [actualizar_vendidas, actualizar_ofrecidas]
+    for paso in pasos:
+        try:
+            paso()
+        except Exception:
+            print(f"ERROR en {paso.__name__}:")
+            traceback.print_exc()
 
 
 if __name__ == "__main__":

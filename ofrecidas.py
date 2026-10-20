@@ -241,6 +241,75 @@ def _filas_de_datos(ruta: Path) -> int:
         wb.close()
 
 
+def _header(ruta: Path) -> tuple:
+    """Fila de encabezado del Excel (tupla vacia si no hay)."""
+    wb = openpyxl.load_workbook(ruta, read_only=True, data_only=True)
+    try:
+        return next(wb.active.iter_rows(values_only=True), None) or ()
+    finally:
+        wb.close()
+
+
+def procesar_ofrecidas(
+    ruta_export: Path, anteriores: list[dict], vendidas_por_id: dict[int, dict]
+) -> tuple[list[dict] | None, dict | None, str | None]:
+    """Parsea el export y lo cruza con la semana anterior y con las vendidas.
+
+    Devuelve (final, resultado, alerta). Si hay alerta, final es None y no se debe escribir nada.
+    """
+    motivo = validar_columnas(_header(ruta_export))
+    if motivo:
+        return None, None, motivo
+    try:
+        descargadas = parsear_ofrecidas(ruta_export)
+    except ValueError as e:
+        return None, None, str(e)
+    if not descargadas:
+        return None, None, "El export de ofrecidas no trajo ninguna propiedad valida."
+    alerta = descarga_sospechosa(len(descargadas), len(anteriores))
+    if alerta:
+        return None, None, alerta
+    resultado = comparar(anteriores, descargadas, vendidas_por_id)
+    return resultado["ofrecidas"], resultado, None
+
+
+def escribir_hoja_ofrecidas(ruta_resumen: Path, resultado: dict | None, alerta: str | None) -> None:
+    """Crea o reemplaza la hoja "Ofrecidas" de resumen_actualizacion.xlsx (crea el libro si falta)."""
+    ruta_resumen = Path(ruta_resumen)
+    if ruta_resumen.exists():
+        wb = openpyxl.load_workbook(ruta_resumen)
+        if "Ofrecidas" in wb.sheetnames:
+            del wb["Ofrecidas"]
+        ws = wb.create_sheet("Ofrecidas")
+    else:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Ofrecidas"
+
+    ws.append(["Estado", f"ALERTA - {alerta}" if alerta else "OK"])
+    if resultado:
+        ws.append(["En venta antes", resultado["en_venta_antes"]])
+        ws.append(["Nuevas", len(resultado["nuevas"])])
+        ws.append(["Pasaron a vendidas", len(resultado["pasaron_a_vendidas"])])
+        ws.append(["Dadas de baja", len(resultado["dadas_de_baja"])])
+        ws.append(["En venta ahora", len(resultado["ofrecidas"])])
+        ws.append([])
+        ws.append(["Pasaron a vendidas"])
+        ws.append(["ID", "Dirección", "Barrio", "Precio pedido", "Moneda", "Precio de cierre USD"])
+        vendidas = set()
+        for r in resultado["pasaron_a_vendidas"]:
+            vendidas.add(r["id"])
+            ws.append([r["id"], r["dir"], r["mu"], r["pp"], r["mon"], r["pr_cierre"]])
+        ws.append([])
+        ws.append(["Cambios de precio"])
+        ws.append(["ID", "Antes", "Moneda", "Después", "Moneda"])
+        for c in resultado["cambios_precio"]:
+            if c["id"] in vendidas:  # ya figura como vendida: su cambio de precio es ruido
+                continue
+            ws.append([c["id"], c["antes"][0], c["antes"][1], c["despues"][0], c["despues"][1]])
+    wb.save(ruta_resumen)
+
+
 def _inicial(ruta: Path) -> None:
     leidas = _filas_de_datos(ruta)
     parseadas = parsear_ofrecidas(ruta)  # valida columnas; levanta ValueError si faltan
