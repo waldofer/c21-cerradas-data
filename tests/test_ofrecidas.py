@@ -5,6 +5,8 @@ import openpyxl
 from ofrecidas import (
     CAMPOS,
     COLUMNAS_REQUERIDAS,
+    comparar,
+    descarga_sospechosa,
     parse_precio,
     parsear_ofrecidas,
     validar_columnas,
@@ -153,3 +155,79 @@ def test_validar_columnas():
     assert "PRECIO" in validar_columnas(sin_precio)
     assert validar_columnas(HEADER) is None
     assert COLUMNAS_REQUERIDAS <= set(HEADER)
+
+
+def rec(id, pp=100000.0, mon="USD", **cambios):
+    """Registro de ofrecida ya parseado (forma de salida de parsear_ofrecidas)."""
+    r = {k: None for k in CAMPOS}
+    r.update(id=id, mu="Asuncion", dir=f"Calle {id}", pp=pp, mon=mon, mt=100.0)
+    r.update(cambios)
+    return r
+
+
+def ids(lista):
+    return [r["id"] for r in lista]
+
+
+def test_comparar_nueva():
+    res = comparar([rec(1)], [rec(1), rec(2)], {})
+    assert ids(res["ofrecidas"]) == [1, 2]
+    assert ids(res["nuevas"]) == [2]
+    assert res["en_venta_antes"] == 1
+
+
+def test_comparar_paso_a_vendidas():
+    res = comparar([rec(1), rec(2)], [rec(1)], {2: {"pr": 80000.0}})
+    assert ids(res["ofrecidas"]) == [1]
+    assert res["pasaron_a_vendidas"][0]["id"] == 2
+    assert res["pasaron_a_vendidas"][0]["pr_cierre"] == 80000.0
+    assert res["dadas_de_baja"] == []
+
+
+def test_comparar_dada_de_baja():
+    res = comparar([rec(1), rec(2)], [rec(1)], {})
+    assert ids(res["dadas_de_baja"]) == [2]
+    assert res["pasaron_a_vendidas"] == []
+
+
+def test_comparar_esta_en_las_dos():
+    res = comparar([rec(1)], [rec(1)], {1: {"pr": 90000.0}})
+    assert res["ofrecidas"] == []
+    assert ids(res["pasaron_a_vendidas"]) == [1]
+    assert res["dadas_de_baja"] == []
+    assert res["nuevas"] == []
+
+
+def test_comparar_cambio_precio():
+    antes = rec(1, pp=420000000.0, mon="PYG")
+    despues = rec(1, pp=400000000.0, mon="PYG")
+    res = comparar([antes], [despues], {})
+    assert res["cambios_precio"] == [
+        {"id": 1, "antes": (420000000.0, "PYG"), "despues": (400000000.0, "PYG")}
+    ]
+    assert comparar([antes], [dict(antes)], {})["cambios_precio"] == []
+
+
+def test_comparar_pasaron_a_vendidas_trae_datos_de_la_ofrecida():
+    ant = rec(7, pp=150000.0, mon="USD", dir="Av. Mcal. Lopez 100", mu="Luque")
+    (v,) = comparar([ant], [], {7: {"pr": 140000.0}})["pasaron_a_vendidas"]
+    assert v == {"id": 7, "dir": "Av. Mcal. Lopez 100", "mu": "Luque",
+                 "pp": 150000.0, "mon": "USD", "pr_cierre": 140000.0}
+
+
+def test_comparar_nueva_vendida_no_cuenta_como_nueva():
+    res = comparar([], [rec(5)], {5: {"pr": 1.0}})
+    assert res["ofrecidas"] == [] and res["nuevas"] == []
+    assert res["pasaron_a_vendidas"] == []
+
+
+def test_descarga_sospechosa_corta():
+    msg = descarga_sospechosa(3000, 8440)
+    assert isinstance(msg, str)
+    assert "3000" in msg and "8440" in msg
+
+
+def test_descarga_sospechosa_normal():
+    assert descarga_sospechosa(8300, 8440) is None
+    assert descarga_sospechosa(6752, 8440) is None  # exactamente 80%
+    assert descarga_sospechosa(5, 0) is None  # primera corrida

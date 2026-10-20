@@ -117,3 +117,64 @@ def parsear_ofrecidas(path: Path) -> list[dict]:
         return list(por_id.values())
     finally:
         wb.close()
+
+
+# Si la descarga trae menos del 80% de las ofrecidas de la semana anterior,
+# se la trata como rota y no se publica.
+UMBRAL_DESCARGA = 0.8
+
+
+def descarga_sospechosa(n_nuevas: int, n_anteriores: int, umbral: float = UMBRAL_DESCARGA):
+    """Mensaje (str) si la descarga parece cortada; None si es normal o es la primera corrida."""
+    if n_anteriores == 0 or n_nuevas >= umbral * n_anteriores:
+        return None
+    return (
+        f"La descarga de ofrecidas trajo {n_nuevas} propiedades y la semana anterior "
+        f"habia {n_anteriores} (menos del {umbral:.0%}); se la considera incompleta."
+    )
+
+
+def comparar(anteriores: list[dict], descargadas: list[dict], vendidas_por_id: dict[int, dict]) -> dict:
+    """Compara la descarga de esta semana con la anterior y con las vendidas.
+
+    Una ofrecida que ya figura en `vendidas_por_id` no se publica como ofrecida.
+    """
+    ant = {r["id"]: r for r in anteriores}
+    desc = {r["id"]: r for r in descargadas}
+
+    ofrecidas = sorted(
+        (r for i, r in desc.items() if i not in vendidas_por_id), key=lambda r: r["id"]
+    )
+    nuevas = [r for r in ofrecidas if r["id"] not in ant]
+    pasaron_a_vendidas = [
+        {
+            "id": i,
+            "dir": r["dir"],
+            "mu": r["mu"],
+            "pp": r["pp"],
+            "mon": r["mon"],
+            "pr_cierre": vendidas_por_id[i]["pr"],
+        }
+        for i, r in ant.items()
+        if i in vendidas_por_id
+    ]
+    dadas_de_baja = [
+        r for i, r in ant.items() if i not in desc and i not in vendidas_por_id
+    ]
+    cambios_precio = [
+        {
+            "id": i,
+            "antes": (ant[i]["pp"], ant[i]["mon"]),
+            "despues": (r["pp"], r["mon"]),
+        }
+        for i, r in desc.items()
+        if i in ant and (ant[i]["pp"], ant[i]["mon"]) != (r["pp"], r["mon"])
+    ]
+    return {
+        "ofrecidas": ofrecidas,
+        "nuevas": nuevas,
+        "pasaron_a_vendidas": pasaron_a_vendidas,
+        "dadas_de_baja": dadas_de_baja,
+        "cambios_precio": cambios_precio,
+        "en_venta_antes": len(anteriores),
+    }
