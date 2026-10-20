@@ -6,7 +6,9 @@ Modulo puro: solo openpyxl y la libreria estandar. No importa
 Privacidad: el export trae datos del propietario y columnas comerciales. Nada de
 eso puede salir de aca; la salida se arma SIEMPRE desde la lista blanca `CAMPOS`.
 """
+import json
 import re
+import sys
 from pathlib import Path
 
 import openpyxl
@@ -178,3 +180,53 @@ def comparar(anteriores: list[dict], descargadas: list[dict], vendidas_por_id: d
         "cambios_precio": cambios_precio,
         "en_venta_antes": len(anteriores),
     }
+
+
+OFRECIDAS_PATH = Path(__file__).parent / "data" / "ofrecidas.json"
+CERRADAS_PATH = Path(__file__).parent / "data" / "cerradas.json"
+
+
+def guardar_ofrecidas(registros: list[dict], path: Path = OFRECIDAS_PATH) -> None:
+    """JSON compacto ordenado por id. Escribe a .tmp y reemplaza, para no dejar un archivo roto."""
+    path = Path(path)
+    ordenados = sorted(registros, key=lambda r: r["id"])
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps(ordenados, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
+    )
+    tmp.replace(path)
+
+
+def _cerradas_por_id(path: Path = CERRADAS_PATH) -> dict[int, dict]:
+    with open(path, encoding="utf-8") as f:
+        return {r["id"]: r for r in json.load(f)}
+
+
+def _filas_de_datos(ruta: Path) -> int:
+    """Cantidad de filas con algun valor debajo del encabezado."""
+    wb = openpyxl.load_workbook(ruta, read_only=True, data_only=True)
+    try:
+        filas = wb.active.iter_rows(values_only=True)
+        next(filas, None)
+        return sum(1 for f in filas if any(c is not None and str(c).strip() for c in f))
+    finally:
+        wb.close()
+
+
+def _inicial(ruta: Path) -> None:
+    leidas = _filas_de_datos(ruta)
+    parseadas = parsear_ofrecidas(ruta)  # valida columnas; levanta ValueError si faltan
+    publicables = comparar([], parseadas, _cerradas_por_id())["ofrecidas"]
+    guardar_ofrecidas(publicables)
+    print(
+        f"Filas leidas: {leidas} | descartadas (sin M2T, precio ilegible, sin ID o repetidas): "
+        f"{leidas - len(parseadas)} | ya vendidas (excluidas): {len(parseadas) - len(publicables)} "
+        f"| guardadas: {len(publicables)}"
+    )
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "inicial":
+        _inicial(Path(sys.argv[2]))
+    else:
+        sys.exit("Uso: python ofrecidas.py inicial <ruta.xlsx>")

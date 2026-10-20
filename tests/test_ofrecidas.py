@@ -7,6 +7,7 @@ from ofrecidas import (
     COLUMNAS_REQUERIDAS,
     comparar,
     descarga_sospechosa,
+    guardar_ofrecidas,
     parse_precio,
     parsear_ofrecidas,
     validar_columnas,
@@ -231,3 +232,15 @@ def test_descarga_sospechosa_normal():
     assert descarga_sospechosa(8300, 8440) is None
     assert descarga_sospechosa(6752, 8440) is None  # exactamente 80%
     assert descarga_sospechosa(5, 0) is None  # primera corrida
+
+
+def test_guardar_ofrecidas_ida_y_vuelta(tmp_path):
+    destino = tmp_path / "ofrecidas.json"
+    registros = [
+        {"id": 20, "dir": "Calle Ñandú", "pp": 1.5},
+        {"id": 3, "dir": "Av. España", "pp": 2.0},
+    ]
+    guardar_ofrecidas(registros, destino)
+    assert json.loads(destino.read_text(encoding="utf-8")) == sorted(registros, key=lambda r: r["id"])
+    assert "Ñandú" in destino.read_text(encoding="utf-8")  # sin escapes ASCII
+    assert list(tmp_path.glob("*.tmp")) == []
