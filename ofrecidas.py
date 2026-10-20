@@ -61,12 +61,14 @@ def validar_columnas(header):
 
 # Celulares paraguayos: prefijo opcional (+595 / 595 / 0) y separadores opcionales.
 _RE_CELULAR = re.compile(
-    r"(?<!\d)(?<!\d[\s-])"  # no tomar un tramo de un numero mas largo (p. ej. un precio con espacios)
-    r"(?:(?:\+?595[\s-]?|0)9\d{2}|9[6-9]\d)"  # con prefijo, o sin prefijo solo 96x-99x
+    # Con prefijo (+595 / 595 / 0): basta que no sea cola de otro numero pegado.
+    r"[\s-]*(?:(?<!\d)(?:\+?595[\s-]?|0)9\d{2}"
+    # Sin prefijo: solo 96x-99x, y no como tramo de un numero mas largo (p. ej. un precio con espacios).
+    r"|(?<!\d)(?<!\d[\s-])9[6-9]\d)"
     r"[\s-]?\d{3}[\s-]?\d{3}(?!\d)"
 )
 # Cualquier corrida de 9 o mas digitos seguidos.
-_RE_DIGITOS_LARGOS = re.compile(r"\d{9,}")
+_RE_DIGITOS_LARGOS = re.compile(r"[\s-]*\d{9,}")
 
 
 def quitar_telefonos(v):

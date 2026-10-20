@@ -281,6 +281,15 @@ def test_quitar_telefonos_sin_prefijo():
         assert quitar_telefonos(txt) == txt
 
 
+def test_quitar_telefonos_con_prefijo_tras_numero_corto():
+    assert quitar_telefonos("Mz 5 0981 123 456") == "Mz 5"
+    assert quitar_telefonos("Casa 12-0981-123-456") == "Casa 12"
+    assert quitar_telefonos("Lote 12 +595 981 123 456") == "Lote 12"
+    assert quitar_telefonos("Lote 12 +595981123456") == "Lote 12"
+    assert quitar_telefonos("Gs. 900 000 000") == "Gs. 900 000 000"
+    assert quitar_telefonos("Gs. 1 981 123 456") == "Gs. 1 981 123 456"
+
+
 def _excel_con(tmp_path, dir_, en):
     wb = openpyxl.Workbook()
     ws = wb.active
