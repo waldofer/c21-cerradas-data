@@ -6,6 +6,7 @@ Modulo puro: solo openpyxl y la libreria estandar. No importa
 Privacidad: el export trae datos del propietario y columnas comerciales. Nada de
 eso puede salir de aca; la salida se arma SIEMPRE desde la lista blanca `CAMPOS`.
 """
+import hashlib
 import json
 import math
 import re
@@ -111,54 +112,37 @@ def quitar_telefonos(v):
 # algo con pinta de telefono (aunque sea una forma que el filtro no conoce), no se publica nada.
 # Preferimos frenar una semana a tener que reescribir el historial del repo publico.
 
-# Todo lo que no sea un digito ni una letra y tenga hasta 3 caracteres se toma como separador
-# entre grupos de un mismo numero ("0981 123 456", "0981/123456", "1234,021 612 345",
-# "0981–123–456"). Ante la duda, se juntan: la barrera prefiere frenar de mas.
-_RE_GRUPO = re.compile(r"\d+")
-_RE_SEPARADOR = re.compile(r"[^\w@]{1,3}")
+# Solo una letra corta un numero: espacios, guiones, barras, parentesis, puntos o lo que sea
+# entre digitos se toma como parte del mismo numero ("(021) - 612345", "0 9 8 1 1 2 3 4 5 6").
+# Antes se sacan las cosas conocidas que tienen digitos y no son telefonos.
+_RE_LETRAS = re.compile(r"[^\W\d_]+")
+# Monto redondo con miles ("1.050.000.000", "Gs 900 000 000"): los precios terminan en 000.
+_RE_MONTO = re.compile(r"(?<![\d.])\d{1,3}(?:([. ])\d{3})(?:\1\d{3})*(?![\d])")
+# Coordenada decimal ("-25.2674758", "-59.5123456"), fecha ("12/05/2021") y hora ("08:00").
+_RE_COORDENADA = re.compile(r"(?<!\d)-?\d{1,2}\.\d{5,}")
+_RE_FECHA = re.compile(r"(?<!\d)\d{1,2}[/-]\d{1,2}[/-](?:\d{4}|\d{2})(?!\d)")
+_RE_HORA = re.compile(r"(?<!\d)\d{1,2}:\d{2}(?!\d)")
 # Codigo postal paraguayo (6 digitos que empiezan con 0), que el geocodificador agrega a la
 # direccion: "Asuncion 001204 388", "SAN JUAN BAUTISTA 080106 080106".
 _RE_CODIGO_POSTAL = re.compile(r"0\d{5}")
-# Un telefono tiene a lo sumo 13 digitos (+595 981 123 456): las ventanas mas largas no cuentan.
-_MAX_GRUPOS_VENTANA = 6
+# Un telefono tiene a lo sumo 13 digitos (+595 981 123 456).
+_MAX_DIGITOS = 13
+_CORTE = "|"
 
 
-def _secuencias(texto: str):
-    """Grupos de digitos consecutivos separados solo por separadores cortos.
+def _sin_numeros_conocidos(texto: str) -> str:
+    def monto(m):
+        return _CORTE if m.group().endswith("000") and m.group(1) else m.group()
 
-    Devuelve listas de (grupo, separador_previo)."""
-    secuencia, fin_anterior = [], None
-    for m in _RE_GRUPO.finditer(texto):
-        sep = texto[fin_anterior:m.start()] if fin_anterior is not None else None
-        if secuencia and not _RE_SEPARADOR.fullmatch(sep):
-            yield secuencia
-            secuencia = []
-        secuencia.append((m.group(), sep if secuencia else None))
-        fin_anterior = m.end()
-    if secuencia:
-        yield secuencia
+    texto = _RE_MONTO.sub(monto, texto)
+    for patron in (_RE_COORDENADA, _RE_FECHA, _RE_HORA):
+        texto = patron.sub(_CORTE, texto)
+    return _RE_LETRAS.sub(_CORTE, texto)
 
 
-def _es_monto(secuencia) -> bool:
-    """Monto redondo con miles: "1 050 000 000", "420.000.000". Los precios terminan en 000."""
-    grupos = [g for g, _ in secuencia]
-    seps = {s.strip() or " " for _, s in secuencia[1:]}
+def _digitos_parecen_telefono(d: str) -> bool:
     return (
-        len(grupos) >= 2 and len(grupos[0]) <= 3 and all(len(g) == 3 for g in grupos[1:])
-        and len(seps) == 1 and seps <= {".", " "} and grupos[-1] == "000"
-    )
-
-
-def _ventana_parece_telefono(ventana) -> bool:
-    grupos = [g for g, _ in ventana]
-    if any(_RE_CODIGO_POSTAL.fullmatch(g) for g in grupos):
-        return False
-    # Coordenada decimal: "-25.2674758", "-59.5123456".
-    if len(grupos) >= 2 and len(grupos[0]) <= 2 and ventana[1][1] == "." and len(grupos[1]) >= 5:
-        return False
-    d = "".join(grupos)
-    return (
-        (9 <= len(d) <= 13 and (d.startswith("0") or d.startswith("595")))  # con prefijo
+        (9 <= len(d) <= _MAX_DIGITOS and (d.startswith("0") or d.startswith("595")))  # con prefijo
         or (len(d) == 9 and d[0] == "9" and d[1] in "6789")  # celular sin prefijo
         or (len(d) == 8 and d.startswith("21"))  # fijo de Asuncion sin el 0
     )
@@ -172,20 +156,49 @@ def parece_telefono(texto) -> bool:
     texto = unicodedata.normalize("NFKC", texto)
     if "@" in texto or re.search(r"\d{9,}", texto):
         return True
-    for secuencia in _secuencias(texto):
-        if _es_monto(secuencia):
-            continue
-        # El telefono puede empezar en cualquier grupo ("Lote 3 981 123 456 USD 120.000").
-        for i in range(len(secuencia)):
-            for j in range(i + 1, min(len(secuencia), i + _MAX_GRUPOS_VENTANA) + 1):
-                if _ventana_parece_telefono(secuencia[i:j]):
+    for tramo in _sin_numeros_conocidos(texto).split(_CORTE):
+        grupos = re.findall(r"\d+", tramo)
+        # El telefono puede empezar en cualquier grupo ("Lote 3 981 123 456"); un codigo
+        # postal corta la ventana.
+        for i in range(len(grupos)):
+            d = ""
+            for g in grupos[i:]:
+                if _RE_CODIGO_POSTAL.fullmatch(g):
+                    break
+                d += g
+                if len(d) > _MAX_DIGITOS:
+                    break
+                if _digitos_parecen_telefono(d):
                     return True
     return False
 
 
-def telefonos_residuales(registros: list[dict]) -> list[int]:
-    """IDs de los registros cuya direccion o titulo tiene algo con pinta de telefono."""
-    return [r["id"] for r in registros if parece_telefono(r.get("dir")) or parece_telefono(r.get("en"))]
+# IDs revisados a mano que la barrera frena sin ser telefonos. Cada uno guarda la huella del texto
+# revisado: si la direccion o el titulo cambian, la excepcion deja de valer y se vuelve a frenar.
+EXCEPCIONES_PATH = Path(__file__).parent / "excepciones_barrera.json"
+
+
+def huella_texto(registro: dict) -> str:
+    texto = f"{registro.get('dir') or ''}\n{registro.get('en') or ''}"
+    return hashlib.sha256(texto.encode("utf-8")).hexdigest()[:16]
+
+
+def cargar_excepciones(path: Path = EXCEPCIONES_PATH) -> dict[str, str]:
+    path = Path(path)
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def telefonos_residuales(registros: list[dict], excepciones: dict[str, str] | None = None) -> list[int]:
+    """IDs de los registros cuya direccion o titulo tiene algo con pinta de telefono.
+
+    `excepciones` ({id: huella}) saltea los revisados a mano, solo si el texto no cambio."""
+    if excepciones is None:
+        excepciones = cargar_excepciones()
+    return [
+        r["id"] for r in registros
+        if (parece_telefono(r.get("dir")) or parece_telefono(r.get("en")))
+        and excepciones.get(str(r["id"])) != huella_texto(r)
+    ]
 
 
 def _lista_ids(ids: list[int], tope: int = 20) -> str:
@@ -427,12 +440,15 @@ def procesar_ofrecidas(
             f"Las ofrecidas nuevas ({n_nuevas}) superan el limite de seguridad "
             f"({LIMITE_NUEVAS_OFRECIDAS}); se la considera una descarga inflada."
         )
-    sospechosos = telefonos_residuales(resultado["ofrecidas"])
+    sospechosos = set(telefonos_residuales(resultado["ofrecidas"]))
     if sospechosos:
+        # IDs y huellas, nunca el texto. Si se revisan en 21online y no son telefonos, se copian
+        # "id": "huella" a excepciones_barrera.json y se corre de nuevo con --solo-ofrecidas.
+        detalle = [f"{r['id']} ({huella_texto(r)})" for r in resultado["ofrecidas"] if r["id"] in sospechosos]
         return None, resultado, (
             f"{len(sospechosos)} propiedades tienen en la direccion o el titulo algo con pinta de "
-            f"telefono que el filtro no limpio; esta semana no se publica. Revisar estos IDs en "
-            f"21online y ampliar el filtro: {_lista_ids(sospechosos)}"
+            f"telefono que el filtro no limpio; esta semana no se publica. ID (huella): "
+            f"{', '.join(detalle[:20])}{' ...' if len(detalle) > 20 else ''}"
         )
     return resultado["ofrecidas"], resultado, None
 

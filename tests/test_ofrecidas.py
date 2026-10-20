@@ -588,3 +588,48 @@ def test_parece_telefono_no_explota_con_textos_largos():
     t0 = time.perf_counter()
     assert not ofrecidas.parece_telefono(" ".join(["12"] * 2000))
     assert time.perf_counter() - t0 < 15  # antes de acotar las ventanas, esto no terminaba
+
+
+@pytest.mark.parametrize("txt", [
+    # separadores largos y digitos sueltos (regresion de la revision)
+    "Calle 1 (0981) - 123456", "Calle 1 (021) - 612345", "Tel (021) - 612 345",
+    "Calle 1 0981 -- 123 456", "Calle 1 0981 / / 123456", "Calle 1 0981 . . 123 456",
+    "Calle 1 0981 ... 123456", "Calle 1 0981 - / 123 456", "Calle 1 21 - - 612345",
+    "Calle 1 0 9 8 1 1 2 3 4 5 6", "Calle 1 0 9 8 1 - 1 2 3 - 4 5 6", "Calle 1 0 981 1 2 3 4 5 6",
+    "Calle 1 0981_123_456", "Gs. 1.981.123.456",
+])
+def test_parece_telefono_detecta_separadores_largos(txt):
+    assert ofrecidas.parece_telefono(txt)
+
+
+@pytest.mark.parametrize("txt", [
+    # precios redondos al lado de otro numero
+    "Gs. 1.000.000.000, 3 dormitorios", "Casa Gs. 1.050.000.000 - 3 dorm", "Gs 2.000.000.000 (2 casas)",
+    "Gs. 1.080.000.000 / 2 lotes", "Gs 1.000.000.000 2 dorm", "Gs. 1.000.000.000/ 2 dorm",
+    "Terreno 360 m2 1.000.000.000", "Lote de 1.200 m² 1.050.000.000", "Gs 1.595.000.000, 3 dorm",
+    "Gs. 21.000.000 - 3 dorm",
+    # coordenadas, fechas y horarios
+    "-25.0512345, -57.6123456", "-25.0981234 -57.5747106", "12/05/2021 - 13/06/2022",
+    "Lun-Vie 08:00-12:00 / 14:00-18:00", "Calle 2160 001204 2160",
+])
+def test_parece_telefono_respeta_precios_fechas_y_coordenadas(txt):
+    assert not ofrecidas.parece_telefono(txt)
+
+
+def test_excepciones_saltean_solo_si_el_texto_no_cambio():
+    reg = _registro(9)
+    reg["dir"] = "Lotes 01, 02, 03, 04, 05"
+    assert ofrecidas.telefonos_residuales([reg], {}) == [9]
+    excepciones = {"9": ofrecidas.huella_texto(reg)}
+    assert ofrecidas.telefonos_residuales([reg], excepciones) == []
+    reg["dir"] = "Lotes 01, 02, 03, 04, 05 0981 123 456"
+    assert ofrecidas.telefonos_residuales([reg], excepciones) == [9]
+
+
+def test_alerta_de_barrera_trae_id_y_huella_sin_texto(tmp_path):
+    filas = [fila_valida(ID="1"), fila_valida(ID="2", DIRECCION="Calle 2 (021) - 6123456")]
+    final, resultado, alerta = procesar_ofrecidas(armar_excel(tmp_path, filas), [_registro(1)], {})
+    assert final is None
+    reg2 = next(r for r in resultado["ofrecidas"] if r["id"] == 2)
+    assert f"2 ({ofrecidas.huella_texto(reg2)})" in alerta
+    assert "6123456" not in alerta
