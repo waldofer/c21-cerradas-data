@@ -553,7 +553,9 @@ def test_guardar_ofrecidas_se_niega_si_queda_algo_con_pinta_de_telefono(tmp_path
 
 
 @pytest.mark.parametrize("txt", [
-    "Gs. 1 050 000 000", "Gs 2 021 612 345", "precio 1 050 000 000 Gs", "USD 1 098 123",
+    "Gs. 1 050 000 000", "precio 1 050 000 000 Gs", "USD 1 098 123",
+    "Precio: 1 050 000 000", "1 050 000 000 dolares", "Gs.1 050 000 000", "Precio 1 050 000 000.-",
+    "Gs. 960.000.000", "Gs. 2.100.000", "Cta. Cte. Ctral. 15-0123-45", "Lote de 21 600 m2",
 ])
 def test_parece_telefono_respeta_montos_con_espacios(txt):
     assert not ofrecidas.parece_telefono(txt)
@@ -562,3 +564,27 @@ def test_parece_telefono_respeta_montos_con_espacios(txt):
 def test_parece_telefono_sin_moneda_frena_aunque_parezca_monto():
     # Sin moneda al lado no hay forma de saber: se frena (mejor una semana que el historial).
     assert ofrecidas.parece_telefono("Calle 1 021 612 345")
+
+
+@pytest.mark.parametrize("txt", [
+    # telefono pegado a un numero corto, con un precio al lado
+    "Lote 3 981 123 456 USD 120.000", "Casa 2 981 123 456 Gs 900 millones",
+    "Mz 4 Lote 2 021 612 345 Gs. 150.000.000", "Calle 1 021 612 345 USD", "Gs 2 021 612 345",
+    # guiones tipograficos
+    "0981–123–456", "0981—123456",
+    # coma pegada antes del numero
+    "Palma 1234,021 612 345", "Palma 1234,21 612 345", "Palma 1234,981 123 456",
+    # con puntos y sin prefijo
+    "Tel 981.123.456", "Calle 1 981-123.456", "Tel 21 612.345", "Calle 1 21.612.345",
+    # digitos de ancho completo
+    "０９８１ １２３ ４５６",
+])
+def test_parece_telefono_detecta_casos_de_la_revision(txt):
+    assert ofrecidas.parece_telefono(txt)
+
+
+def test_parece_telefono_no_explota_con_textos_largos():
+    import time
+    t0 = time.perf_counter()
+    assert not ofrecidas.parece_telefono(" ".join(["12"] * 2000))
+    assert time.perf_counter() - t0 < 15  # antes de acotar las ventanas, esto no terminaba

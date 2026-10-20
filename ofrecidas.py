@@ -10,6 +10,7 @@ import json
 import math
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 import openpyxl
@@ -110,32 +111,56 @@ def quitar_telefonos(v):
 # algo con pinta de telefono (aunque sea una forma que el filtro no conoce), no se publica nada.
 # Preferimos frenar una semana a tener que reescribir el historial del repo publico.
 
-# Tramo numerico: digitos con espacios, guiones, barras, puntos o parentesis en el medio.
-_RE_TRAMO = re.compile(r"(?<![\d.,])\+?\(?\d[\d\s\-/().]*\d")
+# Todo lo que no sea un digito ni una letra y tenga hasta 3 caracteres se toma como separador
+# entre grupos de un mismo numero ("0981 123 456", "0981/123456", "1234,021 612 345",
+# "0981–123–456"). Ante la duda, se juntan: la barrera prefiere frenar de mas.
+_RE_GRUPO = re.compile(r"\d+")
+_RE_SEPARADOR = re.compile(r"[^\w@]{1,3}")
 # Codigo postal paraguayo (6 digitos que empiezan con 0), que el geocodificador agrega a la
 # direccion: "Asuncion 001204 388", "SAN JUAN BAUTISTA 080106 080106".
 _RE_CODIGO_POSTAL = re.compile(r"0\d{5}")
+# Un telefono tiene a lo sumo 13 digitos (+595 981 123 456): las ventanas mas largas no cuentan.
+_MAX_GRUPOS_VENTANA = 6
 
 
-# Monto con miles separados por espacio ("1 050 000 000"), y la moneda que lo delata.
-_RE_MILES_CON_ESPACIO = re.compile(r"\d{1,3}(?: \d{3})+")
-_RE_MONEDA_ANTES = re.compile(r"(?:gs\.?|usd|pyg|u\$s|\$)\s*$", re.IGNORECASE)
-_RE_MONEDA_DESPUES = re.compile(r"^\s*(?:gs\b|usd\b|pyg\b|guaran|millones|mill\b)", re.IGNORECASE)
+def _secuencias(texto: str):
+    """Grupos de digitos consecutivos separados solo por separadores cortos.
+
+    Devuelve listas de (grupo, separador_previo)."""
+    secuencia, fin_anterior = [], None
+    for m in _RE_GRUPO.finditer(texto):
+        sep = texto[fin_anterior:m.start()] if fin_anterior is not None else None
+        if secuencia and not _RE_SEPARADOR.fullmatch(sep):
+            yield secuencia
+            secuencia = []
+        secuencia.append((m.group(), sep if secuencia else None))
+        fin_anterior = m.end()
+    if secuencia:
+        yield secuencia
 
 
-def _tramo_parece_telefono(tramo: str) -> bool:
-    digitos = re.sub(r"\D", "", tramo)
-    # Con prefijo 0 o 595 y 9+ digitos: celular o fijo, como sea que este separado.
-    # (595 con puntos no: "-59.5123456" es una coordenada del Chaco.)
-    if len(digitos) >= 9 and (
-        digitos.startswith("0") or (digitos.startswith("595") and "." not in tramo)
-    ):
-        return True
-    if "." in tramo:
+def _es_monto(secuencia) -> bool:
+    """Monto redondo con miles: "1 050 000 000", "420.000.000". Los precios terminan en 000."""
+    grupos = [g for g, _ in secuencia]
+    seps = {s.strip() or " " for _, s in secuencia[1:]}
+    return (
+        len(grupos) >= 2 and len(grupos[0]) <= 3 and all(len(g) == 3 for g in grupos[1:])
+        and len(seps) == 1 and seps <= {".", " "} and grupos[-1] == "000"
+    )
+
+
+def _ventana_parece_telefono(ventana) -> bool:
+    grupos = [g for g, _ in ventana]
+    if any(_RE_CODIGO_POSTAL.fullmatch(g) for g in grupos):
         return False
-    # Celular sin prefijo (96x-99x + 6 digitos) o fijo de Asuncion sin 0 (21 + 6 digitos).
-    return (len(digitos) == 9 and digitos[0] == "9" and digitos[1] in "6789") or (
-        len(digitos) == 8 and digitos.startswith("21")
+    # Coordenada decimal: "-25.2674758", "-59.5123456".
+    if len(grupos) >= 2 and len(grupos[0]) <= 2 and ventana[1][1] == "." and len(grupos[1]) >= 5:
+        return False
+    d = "".join(grupos)
+    return (
+        (9 <= len(d) <= 13 and (d.startswith("0") or d.startswith("595")))  # con prefijo
+        or (len(d) == 9 and d[0] == "9" and d[1] in "6789")  # celular sin prefijo
+        or (len(d) == 8 and d.startswith("21"))  # fijo de Asuncion sin el 0
     )
 
 
@@ -143,19 +168,17 @@ def parece_telefono(texto) -> bool:
     """True si el texto tiene un email o algo que podria ser un telefono."""
     if not texto:
         return False
+    # Digitos de ancho completo ("０９８１") pasan a digitos comunes.
+    texto = unicodedata.normalize("NFKC", texto)
     if "@" in texto or re.search(r"\d{9,}", texto):
         return True
-    for m in _RE_TRAMO.finditer(texto):
-        if _RE_MILES_CON_ESPACIO.fullmatch(m.group()) and (
-            _RE_MONEDA_ANTES.search(texto[: m.start()]) or _RE_MONEDA_DESPUES.match(texto[m.end():])
-        ):
-            continue  # es un monto ("Gs. 1 050 000 000")
-        # El telefono puede empezar en cualquier grupo del tramo ("Calle 1 021 6123456"), salvo
-        # los codigos postales, que se saltean.
-        grupos = [g for g in m.group().split() if not _RE_CODIGO_POSTAL.fullmatch(g)]
-        for i in range(len(grupos)):
-            for j in range(i + 1, len(grupos) + 1):
-                if _tramo_parece_telefono(" ".join(grupos[i:j])):
+    for secuencia in _secuencias(texto):
+        if _es_monto(secuencia):
+            continue
+        # El telefono puede empezar en cualquier grupo ("Lote 3 981 123 456 USD 120.000").
+        for i in range(len(secuencia)):
+            for j in range(i + 1, min(len(secuencia), i + _MAX_GRUPOS_VENTANA) + 1):
+                if _ventana_parece_telefono(secuencia[i:j]):
                     return True
     return False
 
