@@ -5,4 +5,5 @@ log_actualizar_cerradas.txt
 run_actualizar_cerradas.bat
 resumen_actualizacion.xlsx
 _tmp_export_ofrecidas.xlsx
+_tmp_export_ofrecidas_tramo.xlsx
 data/ofrecidas.json.tmp

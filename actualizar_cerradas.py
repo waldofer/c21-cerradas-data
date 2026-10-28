@@ -41,7 +41,7 @@ import os
 import sys
 import time
 import traceback
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import openpyxl
@@ -56,8 +56,12 @@ DATASET_PATH = REPO_DIR / "data" / "cerradas.json"
 DESCARGA_TMP = REPO_DIR / "_tmp_export.xlsx"
 RESUMEN_PATH = REPO_DIR / "resumen_actualizacion.xlsx"
 DESCARGA_OFRECIDAS_TMP = REPO_DIR / "_tmp_export_ofrecidas.xlsx"
-OFRECIDAS_TIMEOUT_GOTO_MS = 1_800_000  # medido 2026-10-19: ~16 min en cargar
-OFRECIDAS_LIMITE_ESTABLE_S = 900
+DESCARGA_OFRECIDAS_TRAMO_TMP = REPO_DIR / "_tmp_export_ofrecidas_tramo.xlsx"
+# Las ofrecidas se bajan en tramos de fecha de alta: con las ~8.400 de una vez la pagina tardo ~16 min
+# (2026-10-19) y en la corrida del 2026-10-26 se cayo ("Page crashed"). Estos limites son por tramo.
+OFRECIDAS_TIMEOUT_GOTO_MS = 600_000
+OFRECIDAS_LIMITE_ESTABLE_S = 300
+OFRECIDAS_INTENTOS = 2  # por tramo; cada intento en una pagina nueva
 
 TC_APROX = 6100  # Gs por USD, fallback si algún PRECIO viene en PYG sin más contexto
 MARGEN_DIAS = 14  # relee los últimos N días por si hubo cargas tardías
@@ -535,6 +539,81 @@ def actualizar_vendidas():
     ruta_export.unlink(missing_ok=True)
 
 
+def tramos_ofrecidas(hoy: date) -> list[tuple[str, str]]:
+    """Rangos de fecha de alta (desde, hasta, inclusive y sin huecos) en que se bajan las ofrecidas.
+
+    Lo publicado antes de 2025 es poco y va en tres tramos; desde 2025, un tramo por mes. El mes en
+    curso va junto con el anterior, para no pedir nunca un tramo de pocos dias que podria venir vacio.
+    """
+    tramos = [("2015-01-01", "2023-12-31"), ("2024-01-01", "2024-06-30"), ("2024-07-01", "2024-12-31")]
+    inicio, mes_actual = date(2025, 1, 1), date(hoy.year, hoy.month, 1)
+    while True:
+        siguiente = date(inicio.year + (inicio.month == 12), inicio.month % 12 + 1, 1)
+        if siguiente >= mes_actual:
+            tramos.append((inicio.isoformat(), hoy.isoformat()))
+            return tramos
+        tramos.append((inicio.isoformat(), (siguiente - timedelta(days=1)).isoformat()))
+        inicio = siguiente
+
+
+def _leer_tabla(path: Path) -> tuple[tuple, list[tuple]]:
+    wb = openpyxl.load_workbook(path, read_only=True)
+    try:
+        filas = list(wb.active.iter_rows(values_only=True))
+    finally:
+        wb.close()
+    return (tuple(filas[0]) if filas else ()), [f for f in filas[1:] if any(c not in (None, "") for c in f)]
+
+
+def exportar_ofrecidas_por_tramos(context, hoy: date, destino: Path = DESCARGA_OFRECIDAS_TMP) -> Path:
+    """Baja las ofrecidas tramo por tramo (ver tramos_ofrecidas) y las junta en un solo Excel.
+
+    Cada intento usa una pagina nueva del mismo contexto (la sesion de 21online se comparte). Si un
+    tramo no baja despues de OFRECIDAS_INTENTOS, viene vacio o con otras columnas, falla todo: un tramo
+    perdido se veria como cientos de "dadas de baja", y la guarda del 80% no lo frenaria si es chico.
+    """
+    encabezado, filas = None, []
+    try:
+        for desde, hasta in tramos_ofrecidas(hoy):
+            for intento in range(1, OFRECIDAS_INTENTOS + 1):
+                page = context.new_page()
+                try:
+                    exportar_reporte(page, desde, hasta, estatus="enPromocion", destino=DESCARGA_OFRECIDAS_TRAMO_TMP,
+                                     timeout_goto_ms=OFRECIDAS_TIMEOUT_GOTO_MS,
+                                     limite_estable_s=OFRECIDAS_LIMITE_ESTABLE_S)
+                    h, datos = _leer_tabla(DESCARGA_OFRECIDAS_TRAMO_TMP)
+                    if not datos:
+                        raise RuntimeError("vino vacio")
+                    break
+                except Exception as e:
+                    print(f"Ofrecidas: tramo {desde} a {hasta}, intento {intento}: {type(e).__name__}")
+                    if intento == OFRECIDAS_INTENTOS:
+                        raise RuntimeError(
+                            f"No se pudo bajar el tramo de ofrecidas {desde} a {hasta}: {type(e).__name__}: {e}"
+                        ) from e
+                finally:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+            if encabezado is None:
+                encabezado = h
+            elif h != encabezado:
+                raise RuntimeError(f"El tramo {desde} a {hasta} vino con otras columnas que los anteriores.")
+            filas += datos
+            print(f"Ofrecidas: tramo {desde} a {hasta}: {len(datos)} filas.")
+    finally:
+        DESCARGA_OFRECIDAS_TRAMO_TMP.unlink(missing_ok=True)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Propiedades"
+    ws.append(list(encabezado))
+    for fila in filas:
+        ws.append(list(fila))
+    wb.save(destino)
+    return destino
+
+
 def vendidas_publicadas() -> dict[int, dict]:
     """Vendidas ya publicadas (HEAD:data/cerradas.json), por id. Se lee de git y no del disco:
     si el push de vendidas quedo frenado por una alerta, lo no publicado no cuenta."""
@@ -578,15 +657,14 @@ def actualizar_ofrecidas() -> bool:
     hoy = datetime.now().strftime("%Y-%m-%d")
     resultado, alerta, ok = None, None, True
     try:
-        print(f"Ofrecidas: exportando enPromocion desde 2015-01-01 hasta {hoy}.")
+        print(f"Ofrecidas: exportando enPromocion por tramos de fecha de alta, desde 2015-01-01 hasta {hoy}.")
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            context = browser.new_context()  # las paginas de cada tramo comparten la sesion
+            page = context.new_page()
             login(page)
-            ruta_export = exportar_reporte(
-                page, "2015-01-01", hoy, estatus="enPromocion", destino=DESCARGA_OFRECIDAS_TMP,
-                timeout_goto_ms=OFRECIDAS_TIMEOUT_GOTO_MS, limite_estable_s=OFRECIDAS_LIMITE_ESTABLE_S,
-            )
+            page.close()
+            ruta_export = exportar_ofrecidas_por_tramos(context, date.fromisoformat(hoy))
             browser.close()
 
         final, resultado, alerta = procesar_ofrecidas(
