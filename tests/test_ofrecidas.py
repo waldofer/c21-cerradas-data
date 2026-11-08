@@ -684,3 +684,28 @@ def test_muchos_montos_no_es_cuadratico():
     t0 = time.perf_counter()
     assert not ofrecidas.parece_telefono(" ".join(["Gs. 1.000.000"] * 3000))
     assert time.perf_counter() - t0 < 15
+
+
+@pytest.mark.parametrize(
+    "celda, esperado",
+    [
+        ("3", 3),
+        ("2.0", 2),
+        ("", None),       # vacio: sin dato
+        ("0", None),      # 0 tambien es sin dato: un pedido de "2 dormitorios" no debe tomarlo como "no tiene"
+        ("abc", None),
+        ("1.5", None),
+        ("-1", None),
+    ],
+)
+def test_parsear_habitaciones(tmp_path, celda, esperado):
+    path = armar_excel(tmp_path, [fila_valida(HABITACIONES=celda)])
+    r = parsear_ofrecidas(path)[0]
+    assert r["hab"] == esperado
+    assert r["hab"] is None or type(r["hab"]) is int
+
+
+def test_parsear_sin_columna_habitaciones_no_frena_la_corrida(tmp_path, monkeypatch):
+    monkeypatch.setitem(globals(), "HEADER", [h for h in HEADER if h != "HABITACIONES"])
+    r = parsear_ofrecidas(armar_excel(tmp_path, [fila_valida()]))[0]
+    assert r["hab"] is None

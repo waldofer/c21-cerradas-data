@@ -17,7 +17,7 @@ from pathlib import Path
 import openpyxl
 
 # Orden y lista blanca de claves de salida.
-CAMPOS = ("id", "mu", "ti", "su", "dir", "en", "of", "pp", "mon", "mt", "mc", "fa", "la", "lo")
+CAMPOS = ("id", "mu", "ti", "su", "dir", "en", "of", "pp", "mon", "mt", "mc", "fa", "la", "lo", "hab")
 
 COLUMNAS_REQUERIDAS = {"ID", "PRECIO", "M2T", "FECHA ALTA", "MUNICIPIO"}
 
@@ -245,6 +245,12 @@ def _numero(v):
     return valor if math.isfinite(valor) else None
 
 
+def _habitaciones(v):
+    """Celda -> entero >= 1, o None si no hay dato (el 0 del export tambien es "sin dato")."""
+    n = _numero(v)
+    return int(n) if n is not None and n >= 1 and n == int(n) else None
+
+
 def parsear_ofrecidas(path: Path) -> list[dict]:
     """Un dict por ID (gana la ultima fila), solo con las claves de CAMPOS.
 
@@ -281,6 +287,7 @@ def parsear_ofrecidas(path: Path) -> list[dict]:
                 "fa": fa[:10] if fa else None,
                 "la": _numero(celda(fila, "LAT")),
                 "lo": _numero(celda(fila, "LON")),
+                "hab": _habitaciones(celda(fila, "HABITACIONES")),
             }
             for clave, col in _TEXTOS.items():
                 valores[clave] = _texto(celda(fila, col))
